@@ -1,7 +1,6 @@
 const {
   Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder,
-  ChannelType, PermissionsBitField,
-  ActionRowBuilder, ButtonBuilder, ButtonStyle
+  ChannelType, PermissionsBitField
 } = require("discord.js");
 
 const fs = require("fs");
@@ -10,8 +9,6 @@ const fetch = require("node-fetch");
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildVoiceStates
   ]
 });
@@ -46,7 +43,7 @@ function getUser(id) {
   return data[id];
 }
 
-// ===== LEVEL SYSTEM =====
+// ===== LEVEL =====
 function checkLevel(user) {
   const needed = user.level * 100;
   if (user.xp >= needed) {
@@ -78,9 +75,23 @@ function updateStreak(user) {
   user.lastStudy = now;
 }
 
-// ===== AI =====
-async function askAI(prompt, memory) {
+// ===== AI TEXT (UPGRADED) =====
+async function askText(prompt, memory) {
   const messages = [
+    {
+      role: "system",
+      content: `
+You are a powerful AI tutor.
+
+Rules:
+- Understand ANY language automatically
+- Reply in the SAME language as the user
+- Answer ANY topic (math, science, coding, history, etc.)
+- Explain clearly step-by-step if needed
+- Keep answers simple but accurate
+- Break down difficult problems
+      `
+    },
     ...memory.slice(-5),
     { role: "user", content: prompt }
   ];
@@ -101,11 +112,68 @@ async function askAI(prompt, memory) {
   return json.choices?.[0]?.message?.content || "No response";
 }
 
-// ===== COMMANDS (FIXED) =====
+// ===== AI IMAGE (UPGRADED) =====
+async function askImage(question, imageUrl) {
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: `
+You are an AI that understands images.
+
+Rules:
+- Detect language automatically
+- Reply in the user's language
+- Solve problems in the image if present
+- Explain step-by-step
+          `
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: question || "Explain this image" },
+            { type: "image_url", image_url: { url: imageUrl } }
+          ]
+        }
+      ]
+    })
+  });
+
+  const json = await res.json();
+  return json.choices?.[0]?.message?.content || "No response";
+}
+
+// ===== COMMANDS =====
 const commands = [
   new SlashCommandBuilder()
     .setName("ask")
-    .setDescription("Ask AI (text or photo)"),
+    .setDescription("Ask AI (text or image)")
+    .addStringOption(o =>
+      o.setName("type")
+        .setDescription("Question or image")
+        .setRequired(true)
+        .addChoices(
+          { name: "question", value: "question" },
+          { name: "image", value: "image" }
+        )
+    )
+    .addStringOption(o =>
+      o.setName("question")
+        .setDescription("Your question")
+        .setRequired(false)
+    )
+    .addAttachmentOption(o =>
+      o.setName("image")
+        .setDescription("Upload an image")
+        .setRequired(false)
+    ),
 
   new SlashCommandBuilder()
     .setName("focus")
@@ -126,14 +194,14 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("leaderboard")
-    .setDescription("View top users"),
+    .setDescription("Top users"),
 
   new SlashCommandBuilder()
     .setName("studyroom")
     .setDescription("Create a study room")
     .addStringOption(o =>
       o.setName("type")
-        .setDescription("Public or private room")
+        .setDescription("Public or private")
         .setRequired(true)
         .addChoices(
           { name: "public", value: "public" },
@@ -142,17 +210,10 @@ const commands = [
     )
 ].map(c => c.toJSON());
 
-// ===== REGISTER COMMANDS =====
+// ===== REGISTER =====
 const rest = new REST({ version: "10" }).setToken(TOKEN);
-
 (async () => {
-  try {
-    console.log("Registering commands...");
-    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-    console.log("Commands registered!");
-  } catch (err) {
-    console.error(err);
-  }
+  await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
 })();
 
 // ===== AUTO DELETE VC =====
@@ -162,125 +223,111 @@ client.on("voiceStateUpdate", (oldState) => {
   }
 });
 
-// ===== INTERACTIONS =====
+// ===== HANDLER =====
 client.on("interactionCreate", async interaction => {
+  if (!interaction.isChatInputCommand()) return;
 
-  // ===== SLASH COMMAND =====
-  if (interaction.isChatInputCommand()) {
-    const user = getUser(interaction.user.id);
+  const user = getUser(interaction.user.id);
 
-    if (interaction.commandName === "ask") {
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("ask_text").setLabel("📝 Question").setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId("ask_image").setLabel("🖼 Photo").setStyle(ButtonStyle.Secondary)
+  // ===== ASK =====
+  if (interaction.commandName === "ask") {
+    const type = interaction.options.getString("type");
+
+    if (type === "question") {
+      const question = interaction.options.getString("question");
+      if (!question) return interaction.reply("❌ Enter a question!");
+
+      await interaction.deferReply();
+
+      const res = await askText(question, user.memory);
+
+      user.memory.push({ role: "user", content: question });
+      user.memory.push({ role: "assistant", content: res });
+
+      return interaction.editReply(res);
+    }
+
+    if (type === "image") {
+      const attachment = interaction.options.getAttachment("image");
+      if (!attachment) return interaction.reply("❌ Upload an image!");
+
+      await interaction.deferReply();
+
+      const res = await askImage(
+        "Explain and solve if it's a question",
+        attachment.url
       );
 
-      return interaction.reply({
-        content: "Choose how you want to ask:",
-        components: [row]
-      });
+      return interaction.editReply(res);
+    }
+  }
+
+  // ===== FOCUS =====
+  if (interaction.commandName === "focus") {
+    const action = interaction.options.getString("action");
+
+    if (action === "start") {
+      user.focusStart = Date.now();
+      return interaction.reply("🎯 Focus started!");
     }
 
-    if (interaction.commandName === "focus") {
-      const action = interaction.options.getString("action");
+    if (action === "stop" && user.focusStart) {
+      const mins = Math.floor((Date.now() - user.focusStart) / 60000);
 
-      if (action === "start") {
-        user.focusStart = Date.now();
-        return interaction.reply("🎯 Focus started!");
-      }
+      user.minutes += mins;
+      user.xp += mins * 3;
 
-      if (action === "stop" && user.focusStart) {
-        const mins = Math.floor((Date.now() - user.focusStart) / 60000);
+      updateStreak(user);
+      const leveledUp = checkLevel(user);
 
-        user.minutes += mins;
-        user.xp += mins * 3;
+      save();
 
-        updateStreak(user);
-        const leveledUp = checkLevel(user);
-
-        save();
-
-        return interaction.reply(
-          `🔥 Studied ${mins} mins\nLevel: ${user.level} (${getRank(user.level)})` +
-          (leveledUp ? "\n🎉 LEVEL UP!" : "")
-        );
-      }
-    }
-
-    if (interaction.commandName === "stats") {
       return interaction.reply(
-        `📊 Level: ${user.level} (${getRank(user.level)})
+        `🔥 ${mins} mins\nLevel: ${user.level} (${getRank(user.level)})` +
+        (leveledUp ? "\n🎉 LEVEL UP!" : "")
+      );
+    }
+  }
+
+  // ===== STATS =====
+  if (interaction.commandName === "stats") {
+    return interaction.reply(
+      `📊 Level: ${user.level} (${getRank(user.level)})
 XP: ${user.xp}
 Minutes: ${user.minutes}
 Streak: ${user.streak}`
-      );
-    }
-
-    if (interaction.commandName === "leaderboard") {
-      const top = Object.entries(data)
-        .sort((a, b) => b[1].level - a[1].level)
-        .slice(0, 5);
-
-      let text = "🏆 Leaderboard:\n";
-      top.forEach((u, i) => {
-        text += `${i + 1}. <@${u[0]}> - Lv ${u[1].level}\n`;
-      });
-
-      return interaction.reply(text);
-    }
-
-    if (interaction.commandName === "studyroom") {
-      const type = interaction.options.getString("type");
-
-      const channel = await interaction.guild.channels.create({
-        name: `Study - ${interaction.user.username}`,
-        type: ChannelType.GuildVoice,
-        permissionOverwrites: type === "private" ? [
-          { id: interaction.guild.id, deny: [PermissionsBitField.Flags.Connect] },
-          { id: interaction.user.id, allow: [PermissionsBitField.Flags.Connect] }
-        ] : []
-      });
-
-      return interaction.reply(`🎙 ${channel}`);
-    }
+    );
   }
 
-  // ===== BUTTON HANDLER =====
-  if (interaction.isButton()) {
-    const user = getUser(interaction.user.id);
+  // ===== LEADERBOARD =====
+  if (interaction.commandName === "leaderboard") {
+    const top = Object.entries(data)
+      .sort((a, b) => b[1].level - a[1].level)
+      .slice(0, 5);
 
-    if (interaction.customId === "ask_text") {
-      await interaction.reply("✏️ Type your question:");
+    let text = "🏆 Leaderboard:\n";
+    top.forEach((u, i) => {
+      text += `${i + 1}. <@${u[0]}> - Lv ${u[1].level}\n`;
+    });
 
-      const filter = m => m.author.id === interaction.user.id;
-      const collected = await interaction.channel.awaitMessages({ filter, max: 1, time: 30000 });
-
-      const msg = collected.first();
-      if (!msg) return interaction.followUp("❌ Time expired");
-
-      const res = await askAI(`Explain clearly:\n${msg.content}`, user.memory);
-
-      user.memory.push({ role: "user", content: msg.content });
-      user.memory.push({ role: "assistant", content: res });
-
-      return interaction.followUp(res);
-    }
-
-    if (interaction.customId === "ask_image") {
-      await interaction.reply("📷 Upload an image:");
-
-      const filter = m => m.author.id === interaction.user.id && m.attachments.size > 0;
-      const collected = await interaction.channel.awaitMessages({ filter, max: 1, time: 30000 });
-
-      const msg = collected.first();
-      if (!msg) return interaction.followUp("❌ No image");
-
-      const imageUrl = msg.attachments.first().url;
-
-      return interaction.followUp(`🖼 Image received!\n${imageUrl}`);
-    }
+    return interaction.reply(text);
   }
 
+  // ===== STUDY ROOM =====
+  if (interaction.commandName === "studyroom") {
+    const type = interaction.options.getString("type");
+
+    const channel = await interaction.guild.channels.create({
+      name: `Study - ${interaction.user.username}`,
+      type: ChannelType.GuildVoice,
+      permissionOverwrites: type === "private" ? [
+        { id: interaction.guild.id, deny: [PermissionsBitField.Flags.Connect] },
+        { id: interaction.user.id, allow: [PermissionsBitField.Flags.Connect] }
+      ] : []
+    });
+
+    return interaction.reply(`🎙 ${channel}`);
+  }
 });
 
 client.login(TOKEN);

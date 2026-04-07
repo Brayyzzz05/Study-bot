@@ -8,7 +8,12 @@ const fs = require("fs");
 const fetch = require("node-fetch");
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildVoiceStates]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildVoiceStates
+  ]
 });
 
 const TOKEN = process.env.TOKEN;
@@ -41,7 +46,7 @@ function getUser(id) {
   return data[id];
 }
 
-// ===== LEVEL =====
+// ===== LEVEL SYSTEM =====
 function checkLevel(user) {
   const needed = user.level * 100;
   if (user.xp >= needed) {
@@ -96,27 +101,58 @@ async function askAI(prompt, memory) {
   return json.choices?.[0]?.message?.content || "No response";
 }
 
-// ===== COMMANDS =====
+// ===== COMMANDS (FIXED) =====
 const commands = [
-  new SlashCommandBuilder().setName("ask").setDescription("Ask AI (text or photo)"),
+  new SlashCommandBuilder()
+    .setName("ask")
+    .setDescription("Ask AI (text or photo)"),
 
-  new SlashCommandBuilder().setName("focus").setDescription("Focus mode")
-    .addStringOption(o => o.setName("action").setRequired(true)
-      .addChoices({ name: "start", value: "start" }, { name: "stop", value: "stop" })),
+  new SlashCommandBuilder()
+    .setName("focus")
+    .setDescription("Start or stop focus mode")
+    .addStringOption(o =>
+      o.setName("action")
+        .setDescription("Start or stop")
+        .setRequired(true)
+        .addChoices(
+          { name: "start", value: "start" },
+          { name: "stop", value: "stop" }
+        )
+    ),
 
-  new SlashCommandBuilder().setName("stats").setDescription("Stats"),
+  new SlashCommandBuilder()
+    .setName("stats")
+    .setDescription("View your stats"),
 
-  new SlashCommandBuilder().setName("leaderboard").setDescription("Top users"),
+  new SlashCommandBuilder()
+    .setName("leaderboard")
+    .setDescription("View top users"),
 
-  new SlashCommandBuilder().setName("studyroom").setDescription("Create room")
-    .addStringOption(o => o.setName("type").setRequired(true)
-      .addChoices({ name: "public", value: "public" }, { name: "private", value: "private" }))
+  new SlashCommandBuilder()
+    .setName("studyroom")
+    .setDescription("Create a study room")
+    .addStringOption(o =>
+      o.setName("type")
+        .setDescription("Public or private room")
+        .setRequired(true)
+        .addChoices(
+          { name: "public", value: "public" },
+          { name: "private", value: "private" }
+        )
+    )
 ].map(c => c.toJSON());
 
-// ===== REGISTER =====
+// ===== REGISTER COMMANDS =====
 const rest = new REST({ version: "10" }).setToken(TOKEN);
+
 (async () => {
-  await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+  try {
+    console.log("Registering commands...");
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+    console.log("Commands registered!");
+  } catch (err) {
+    console.error(err);
+  }
 })();
 
 // ===== AUTO DELETE VC =====
@@ -126,12 +162,11 @@ client.on("voiceStateUpdate", (oldState) => {
   }
 });
 
-// ===== MAIN HANDLER =====
+// ===== INTERACTIONS =====
 client.on("interactionCreate", async interaction => {
 
   // ===== SLASH COMMAND =====
   if (interaction.isChatInputCommand()) {
-
     const user = getUser(interaction.user.id);
 
     if (interaction.commandName === "ask") {
@@ -212,10 +247,8 @@ Streak: ${user.streak}`
 
   // ===== BUTTON HANDLER =====
   if (interaction.isButton()) {
-
     const user = getUser(interaction.user.id);
 
-    // TEXT MODE
     if (interaction.customId === "ask_text") {
       await interaction.reply("✏️ Type your question:");
 
@@ -233,7 +266,6 @@ Streak: ${user.streak}`
       return interaction.followUp(res);
     }
 
-    // IMAGE MODE
     if (interaction.customId === "ask_image") {
       await interaction.reply("📷 Upload an image:");
 

@@ -1,8 +1,15 @@
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require("discord.js");
-const fs = require("fs");
+const {
+  Client,
+  GatewayIntentBits,
+  REST,
+  Routes,
+  SlashCommandBuilder
+} = require("discord.js");
+
 const fetch = require("node-fetch");
 const math = require("mathjs");
 const nerdamer = require("nerdamer/all.min");
+const fs = require("fs");
 
 // ===== CONFIG =====
 const TOKEN = process.env.TOKEN;
@@ -14,7 +21,7 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-// ===== STORAGE =====
+// ===== DATA =====
 let data = {};
 if (fs.existsSync("data.json")) {
   data = JSON.parse(fs.readFileSync("data.json"));
@@ -25,9 +32,7 @@ function save() {
 }
 
 function getUser(id) {
-  if (!data[id]) {
-    data[id] = { xp: 0, level: 1 };
-  }
+  if (!data[id]) data[id] = { xp: 0, level: 1 };
   return data[id];
 }
 
@@ -38,58 +43,109 @@ function levelUp(user) {
   }
 }
 
-// ===== INPUT CHECK =====
+// ===== UTIL =====
 function isMath(input) {
   return /^[\dxyz\+\-\*\/\^\(\)=\s]+$/i.test(input);
 }
 
-// ===== FACTOR DETECTION (CORE FIX) =====
-function analyzeExpression(input) {
+// ===== MATH ENGINE =====
+function solveMath(input) {
   try {
     const clean = input.replace(/\s+/g, "");
 
-    const factored = nerdamer.factor(clean).toString();
-
-    // ✅ If factoring changed → factorable
-    if (factored !== clean) {
+    // EQUATIONS
+    if (clean.includes("=")) {
+      const solved = nerdamer.solveEquations(clean);
       return {
-        answer: factored,
-        explanation: "This expression is factorable"
+        answer: `x = ${solved.join(", ")}`,
+        explanation: "Solved equation"
       };
     }
 
-    // ❌ Try solving
+    // EXPAND
+    const expanded = nerdamer(clean).expand().toString();
+    if (expanded !== clean) {
+      return {
+        answer: expanded,
+        explanation: "Expanded expression"
+      };
+    }
+
+    // FACTOR
+    const factored = nerdamer.factor(clean).toString();
+    if (factored !== clean) {
+      return {
+        answer: factored,
+        explanation: "Factored expression"
+      };
+    }
+
+    // ROOTS
     if (clean.includes("x")) {
       const roots = nerdamer.solveEquations(clean + "=0");
-
-      if (roots && roots.length > 0) {
+      if (roots?.length) {
         return {
           answer: `Roots: ${roots.join(", ")}`,
-          explanation: "Not factorable into simple integers, but solvable"
+          explanation: "Solved algebraically"
         };
       }
     }
 
+    // BASIC CALC
+    const result = math.evaluate(clean);
+
     return {
-      answer: clean,
-      explanation: "Not factorable"
+      answer: result.toString(),
+      explanation: "Calculated"
     };
 
   } catch (err) {
     console.log("MATH ERROR:", err);
-
     return {
-      answer: "❌ Error",
-      explanation: "Math processing failed"
+      answer: "❌ Math error",
+      explanation: "Could not solve"
     };
   }
 }
 
+// ===== PHOTO ANALYSIS =====
+async function analyzeImage(url) {
+  try {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Solve or describe this image." },
+              { type: "image_url", image_url: { url } }
+            ]
+          }
+        ]
+      })
+    });
+
+    const json = await res.json();
+
+    return json.choices?.[0]?.message?.content || "❌ No image result";
+
+  } catch (err) {
+    console.log("IMAGE ERROR:", err);
+    return "❌ Image analysis failed";
+  }
+}
+
 // ===== QUIZ =====
-function quiz(topic, user) {
+function quiz(topic) {
   return {
-    answer: `📚 Quiz started: ${topic}`,
-    explanation: `Explain ${topic} in detail.`
+    answer: `📚 Quiz: ${topic}`,
+    explanation: `Explain ${topic}`
   };
 }
 
@@ -97,7 +153,7 @@ function quiz(topic, user) {
 function flashcards(topic) {
   return {
     answer: `🧾 Flashcards: ${topic}`,
-    explanation: `Q: What is ${topic}?\nA: (Try to recall)`
+    explanation: `Q: What is ${topic}?\nA: (Think)`
   };
 }
 
@@ -106,11 +162,6 @@ const timers = new Map();
 
 function startTimer(userId, mins) {
   timers.set(userId, Date.now() + mins * 60000);
-
-  setTimeout(() => {
-    timers.delete(userId);
-  }, mins * 60000);
-
   return `⏱️ Timer set for ${mins} minutes`;
 }
 
@@ -129,7 +180,7 @@ async function askAI(prompt) {
         messages: [
           {
             role: "system",
-            content: `STRICT FORMAT:
+            content: `Answer STRICTLY:
 
 Answer: <answer>
 
@@ -143,38 +194,41 @@ Explanation:
 
     const data = await res.json();
 
-    if (!data.choices || !data.choices[0]) {
-      return "⚠️ No AI response";
-    }
+    return data.choices?.[0]?.message?.content || "No response";
 
-    return data.choices[0].message.content;
-
-  } catch (err) {
-    console.log("AI ERROR:", err);
-    return "❌ AI failed";
+  } catch {
+    return "❌ AI error";
   }
 }
 
 // ===== ENGINE =====
-async function engine(input, user) {
-  input = input.toLowerCase();
+async function engine(input, user, attachmentUrl) {
 
-  // 🧠 Math FIRST
+  // 📷 IMAGE FIRST
+  if (attachmentUrl) {
+    const img = await analyzeImage(attachmentUrl);
+    return {
+      answer: img,
+      explanation: "Image analyzed"
+    };
+  }
+
+  // 🧠 MATH
   if (isMath(input)) {
-    return analyzeExpression(input);
+    return solveMath(input);
   }
 
-  // 📚 Quiz
+  // 📚 QUIZ
   if (input.startsWith("quiz ")) {
-    return quiz(input.replace("quiz ", ""), user);
+    return quiz(input.replace("quiz ", ""));
   }
 
-  // 🧾 Flashcards
+  // 🧾 FLASHCARDS
   if (input.startsWith("flashcards ")) {
     return flashcards(input.replace("flashcards ", ""));
   }
 
-  // ⏱️ Timer
+  // ⏱️ TIMER
   if (input.startsWith("timer ")) {
     const mins = parseInt(input.replace("timer ", ""));
     return {
@@ -183,7 +237,7 @@ async function engine(input, user) {
     };
   }
 
-  // 🤖 AI fallback
+  // 🤖 AI
   const ai = await askAI(input);
 
   return {
@@ -197,16 +251,13 @@ const commands = [
   new SlashCommandBuilder()
     .setName("ask")
     .setDescription("Ask anything")
-    .addStringOption(option =>
-      option.setName("question")
-        .setDescription("Your question")
-        .setRequired(true)
+    .addStringOption(opt =>
+      opt.setName("question").setDescription("Your question").setRequired(true)
     )
-].map(cmd => cmd.toJSON());
+].map(c => c.toJSON());
 
-// ===== REGISTER =====
+// REGISTER
 const rest = new REST({ version: "10" }).setToken(TOKEN);
-
 (async () => {
   await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
 })();
@@ -219,9 +270,13 @@ client.on("interactionCreate", async interaction => {
     const user = getUser(interaction.user.id);
     const question = interaction.options.getString("question");
 
+    // attachment (image)
+    const attachment = interaction.options.getAttachment?.("image");
+    const imageUrl = attachment?.url;
+
     await interaction.deferReply();
 
-    const result = await engine(question, { ...user, id: interaction.user.id });
+    const result = await engine(question, { ...user, id: interaction.user.id }, imageUrl);
 
     user.xp += 10;
     levelUp(user);

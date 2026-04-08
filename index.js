@@ -1,5 +1,4 @@
-import { Client, GatewayIntentBits, EmbedBuilder } from "discord.js";
-import fetch from "node-fetch";
+import { Client, GatewayIntentBits } from "discord.js";
 
 const client = new Client({
   intents: [
@@ -9,142 +8,165 @@ const client = new Client({
   ]
 });
 
-const BACKEND_URL = process.env.BACKEND_URL;
+const BACKEND = process.env.BACKEND_URL;
 
-// Simple in-memory storage
-const flashcards = new Map();
-const quizzes = new Map();
-const timers = new Map();
+let activeQuiz = new Map();
 
+// =====================
+// READY EVENT (FIXED WARNING)
+// =====================
+client.once("clientReady", () => {
+  console.log(`✅ Logged in as ${client.user.tag}`);
+});
+
+// =====================
+// MESSAGE HANDLER
+// =====================
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
 
-  const args = message.content.split(" ");
-  const command = args.shift().toLowerCase();
+  const args = message.content.trim().split(" ");
+  const cmd = args.shift().toLowerCase();
 
   // =====================
-  // 🧠 ASK (TEXT AI)
+  // 🧠 ASK
   // =====================
-  if (command === "/ask") {
-    const question = args.join(" ");
+  if (cmd === "/ask") {
+    const text = args.join(" ");
 
-    if (!question && message.attachments.size === 0) {
-      return message.reply("❌ Provide a question or image");
-    }
+    if (!text) return message.reply("❌ Ask a question");
 
     try {
-      let body = { message: question };
-
-      // IMAGE SUPPORT
-      if (message.attachments.size > 0) {
-        const image = message.attachments.first().url;
-        body.image = image;
-      }
-
-      const res = await fetch(`${BACKEND_URL}/chat`, {
+      const res = await fetch(`${BACKEND}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body)
+        body: JSON.stringify({ message: text })
       });
 
       const data = await res.json();
-
-      if (!data.reply) {
-        return message.reply("❌ No AI response");
-      }
-
       message.reply(data.reply);
 
     } catch (err) {
-      console.error(err);
-      message.reply("❌ AI error");
+      message.reply("❌ Failed to contact backend");
     }
   }
 
   // =====================
-  // 🧠 FLASHCARDS
+  // 📸 IMAGE
   // =====================
-  if (command === "/flashcard") {
-    const [sub, ...rest] = args;
+  if (cmd === "/image") {
+    const attachment = message.attachments.first();
 
+    if (!attachment) {
+      return message.reply("❌ Attach an image");
+    }
+
+    try {
+      const res = await fetch(`${BACKEND}/image`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: attachment.url })
+      });
+
+      const data = await res.json();
+      message.reply(data.reply);
+
+    } catch (err) {
+      message.reply("❌ Image error");
+    }
+  }
+
+  // =====================
+  // 📚 FLASHCARDS
+  // =====================
+  if (cmd === "/flashcard") {
+    const sub = args.shift();
+
+    // ADD
     if (sub === "add") {
-      const [front, back] = rest.join(" ").split("|");
-      if (!front || !back) {
-        return message.reply("❌ Use: /flashcard add question|answer");
+      const [q, a] = args.join(" ").split("|");
+
+      if (!q || !a) {
+        return message.reply("❌ Format: /flashcard add question|answer");
       }
 
-      flashcards.set(front, back);
-      message.reply("✅ Flashcard saved");
+      await fetch(`${BACKEND}/flashcard/add`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId: message.author.id,
+          question: q,
+          answer: a
+        })
+      });
+
+      return message.reply("✅ Saved");
     }
 
+    // QUIZ
     if (sub === "quiz") {
-      const entries = Array.from(flashcards.entries());
-      if (entries.length === 0) return message.reply("❌ No flashcards");
+      const res = await fetch(`${BACKEND}/flashcard/random`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: message.author.id })
+      });
 
-      const [question, answer] = entries[Math.floor(Math.random() * entries.length)];
+      const data = await res.json();
 
-      quizzes.set(message.author.id, answer);
-
-      message.reply(`❓ ${question}`);
-    }
-
-    if (sub === "answer") {
-      const correct = quizzes.get(message.author.id);
-      const userAnswer = rest.join(" ");
-
-      if (!correct) return message.reply("❌ No active quiz");
-
-      if (userAnswer.toLowerCase() === correct.toLowerCase()) {
-        message.reply("✅ Correct!");
-      } else {
-        message.reply(`❌ Wrong! Answer: ${correct}`);
+      if (!data.question) {
+        return message.reply("❌ No flashcards");
       }
 
-      quizzes.delete(message.author.id);
+      activeQuiz.set(message.author.id, data.answer);
+      message.reply(`❓ ${data.question}`);
+    }
+
+    // ANSWER
+    if (sub === "answer") {
+      const correct = activeQuiz.get(message.author.id);
+      const answer = args.join(" ");
+
+      if (!correct) {
+        return message.reply("❌ No active quiz");
+      }
+
+      const res = await fetch(`${BACKEND}/quiz/check`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ correct, answer })
+      });
+
+      const data = await res.json();
+
+      activeQuiz.delete(message.author.id);
+      message.reply(data.reply);
     }
   }
 
   // =====================
   // ⏱ TIMER
   // =====================
-  if (command === "/timer") {
-    const minutes = parseInt(args[0]);
+  if (cmd === "/timer") {
+    const mins = parseInt(args[0]);
 
-    if (isNaN(minutes)) return message.reply("❌ Enter minutes");
+    if (isNaN(mins)) {
+      return message.reply("❌ Use /timer 5");
+    }
 
-    message.reply(`⏱ Timer started for ${minutes} minutes`);
+    message.reply(`⏱ Timer: ${mins} minutes`);
 
     setTimeout(() => {
-      message.reply(`⏰ Time's up!`);
-    }, minutes * 60000);
+      message.reply("⏰ Time’s up!");
+    }, mins * 60000);
   }
 
   // =====================
-  // ➗ MATH ENGINE (LOCAL)
+  // 🔄 RESET
   // =====================
-  if (command === "/math") {
-    const expression = args.join(" ");
-
-    try {
-      // VERY basic safe eval
-      if (!expression) return message.reply("❌ No expression");
-
-      // Handle simple factorable forms manually
-      if (expression.includes("x^2")) {
-        return message.reply("🧠 Answer: Factorisation handled by AI backend");
-      }
-
-      const result = eval(expression.replace(/[^0-9+\-*/().]/g, ""));
-
-      message.reply(`🧠 Answer: ${result}`);
-    } catch {
-      message.reply("❌ Invalid math");
-    }
+  if (cmd === "/reset") {
+    activeQuiz.delete(message.author.id);
+    message.reply("🔄 Reset done");
   }
-});
-
-client.once("ready", () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
 });
 
 client.login(process.env.DISCORD_TOKEN);

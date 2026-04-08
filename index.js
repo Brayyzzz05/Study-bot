@@ -75,89 +75,121 @@ function updateStreak(user) {
   user.lastStudy = now;
 }
 
-// ===== AI TEXT (UPGRADED) =====
-async function askText(prompt, memory) {
-  const messages = [
-    {
-      role: "system",
-      content: `
-You are a powerful AI tutor.
+// ===== AI (STREAMING FIX) =====
+async function askTextStream(prompt, memory, interaction) {
+  try {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        stream: true,
+        messages: [
+          {
+            role: "system",
+            content: "You are a helpful AI tutor. Reply clearly and step-by-step."
+          },
+          ...memory.slice(-5),
+          { role: "user", content: prompt }
+        ]
+      })
+    });
 
-Rules:
-- Understand ANY language automatically
-- Reply in the SAME language as the user
-- Answer ANY topic (math, science, coding, history, etc.)
-- Explain clearly step-by-step if needed
-- Keep answers simple but accurate
-- Break down difficult problems
-      `
-    },
-    ...memory.slice(-5),
-    { role: "user", content: prompt }
-  ];
+    if (!res.ok || !res.body) {
+      console.log("API ERROR:", await res.text());
+      return "⚠️ AI failed to respond.";
+    }
 
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      messages
-    })
-  });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
 
-  const json = await res.json();
-  return json.choices?.[0]?.message?.content || "No response";
+    let fullText = "";
+    let lastUpdate = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = decoder.decode(value);
+      const lines = chunk.split("\n");
+
+      for (let line of lines) {
+        if (line.startsWith("data: ")) {
+          const data = line.replace("data: ", "");
+
+          if (data === "[DONE]") continue;
+
+          try {
+            const json = JSON.parse(data);
+            const token = json.choices?.[0]?.delta?.content;
+
+            if (token) {
+              fullText += token;
+
+              // Update message occasionally (avoid rate limit)
+              if (fullText.length - lastUpdate.length > 80) {
+                await interaction.editReply(fullText);
+                lastUpdate = fullText;
+              }
+            }
+          } catch {}
+        }
+      }
+    }
+
+    return fullText || "⚠️ No response.";
+  } catch (err) {
+    console.error(err);
+    return "⚠️ Error contacting AI.";
+  }
 }
 
-// ===== AI IMAGE (UPGRADED) =====
+// ===== IMAGE AI =====
 async function askImage(question, imageUrl) {
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content: `
-You are an AI that understands images.
+  try {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: "You analyze images and explain clearly."
+          },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: question || "Explain this image" },
+              { type: "image_url", image_url: { url: imageUrl } }
+            ]
+          }
+        ]
+      })
+    });
 
-Rules:
-- Detect language automatically
-- Reply in the user's language
-- Solve problems in the image if present
-- Explain step-by-step
-          `
-        },
-        {
-          role: "user",
-          content: [
-            { type: "text", text: question || "Explain this image" },
-            { type: "image_url", image_url: { url: imageUrl } }
-          ]
-        }
-      ]
-    })
-  });
-
-  const json = await res.json();
-  return json.choices?.[0]?.message?.content || "No response";
+    const json = await res.json();
+    return json.choices?.[0]?.message?.content || "No response";
+  } catch (err) {
+    console.error(err);
+    return "⚠️ Image AI failed.";
+  }
 }
 
 // ===== COMMANDS =====
 const commands = [
   new SlashCommandBuilder()
     .setName("ask")
-    .setDescription("Ask AI (text or image)")
+    .setDescription("Ask AI")
     .addStringOption(o =>
       o.setName("type")
-        .setDescription("Question or image")
+        .setDescription("question or image")
         .setRequired(true)
         .addChoices(
           { name: "question", value: "question" },
@@ -165,22 +197,18 @@ const commands = [
         )
     )
     .addStringOption(o =>
-      o.setName("question")
-        .setDescription("Your question")
-        .setRequired(false)
+      o.setName("question").setDescription("Your question")
     )
     .addAttachmentOption(o =>
-      o.setName("image")
-        .setDescription("Upload an image")
-        .setRequired(false)
+      o.setName("image").setDescription("Upload image")
     ),
 
   new SlashCommandBuilder()
     .setName("focus")
-    .setDescription("Start or stop focus mode")
+    .setDescription("Focus mode")
     .addStringOption(o =>
       o.setName("action")
-        .setDescription("Start or stop")
+        .setDescription("start or stop")
         .setRequired(true)
         .addChoices(
           { name: "start", value: "start" },
@@ -188,20 +216,16 @@ const commands = [
         )
     ),
 
-  new SlashCommandBuilder()
-    .setName("stats")
-    .setDescription("View your stats"),
+  new SlashCommandBuilder().setName("stats").setDescription("View stats"),
 
-  new SlashCommandBuilder()
-    .setName("leaderboard")
-    .setDescription("Top users"),
+  new SlashCommandBuilder().setName("leaderboard").setDescription("Top users"),
 
   new SlashCommandBuilder()
     .setName("studyroom")
     .setDescription("Create a study room")
     .addStringOption(o =>
       o.setName("type")
-        .setDescription("Public or private")
+        .setDescription("public or private")
         .setRequired(true)
         .addChoices(
           { name: "public", value: "public" },
@@ -216,13 +240,6 @@ const rest = new REST({ version: "10" }).setToken(TOKEN);
   await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
 })();
 
-// ===== AUTO DELETE VC =====
-client.on("voiceStateUpdate", (oldState) => {
-  if (oldState.channel && oldState.channel.members.size === 0) {
-    oldState.channel.delete().catch(() => {});
-  }
-});
-
 // ===== HANDLER =====
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
@@ -233,36 +250,61 @@ client.on("interactionCreate", async interaction => {
   if (interaction.commandName === "ask") {
     const type = interaction.options.getString("type");
 
-    if (type === "question") {
-      const question = interaction.options.getString("question");
-      if (!question) return interaction.reply("❌ Enter a question!");
+    await interaction.deferReply();
 
-      await interaction.deferReply();
+    // TIMEOUT PROTECTION
+    const timeout = setTimeout(() => {
+      interaction.editReply("⚠️ Took too long to respond.");
+    }, 15000);
 
-      const res = await askText(question, user.memory);
+    try {
+      if (type === "question") {
+        const question = interaction.options.getString("question");
+        if (!question) {
+          clearTimeout(timeout);
+          return interaction.editReply("❌ Enter a question!");
+        }
 
-      user.memory.push({ role: "user", content: question });
-      user.memory.push({ role: "assistant", content: res });
+        let res = await askTextStream(question, user.memory, interaction);
 
-      return interaction.editReply(res);
-    }
+        user.memory.push({ role: "user", content: question });
+        user.memory.push({ role: "assistant", content: res });
 
-    if (type === "image") {
-      const attachment = interaction.options.getAttachment("image");
-      if (!attachment) return interaction.reply("❌ Upload an image!");
+        save();
+        clearTimeout(timeout);
+        return;
+      }
 
-      await interaction.deferReply();
+      if (type === "image") {
+        const attachment = interaction.options.getAttachment("image");
+        if (!attachment) {
+          clearTimeout(timeout);
+          return interaction.editReply("❌ Upload an image!");
+        }
 
-      const res = await askImage(
-        "Explain and solve if it's a question",
-        attachment.url
-      );
+        const res = await askImage("Explain this image", attachment.url);
+        clearTimeout(timeout);
+        return interaction.editReply(res);
+      }
 
-      return interaction.editReply(res);
+    } catch (err) {
+      console.error(err);
+      clearTimeout(timeout);
+      return interaction.editReply("❌ Error occurred.");
     }
   }
 
-  // ===== FOCUS =====
+  // ===== OTHER COMMANDS =====
+
+  if (interaction.commandName === "stats") {
+    return interaction.reply(
+      `📊 Level: ${user.level}
+XP: ${user.xp}
+Minutes: ${user.minutes}
+Streak: ${user.streak}`
+    );
+  }
+
   if (interaction.commandName === "focus") {
     const action = interaction.options.getString("action");
 
@@ -273,7 +315,6 @@ client.on("interactionCreate", async interaction => {
 
     if (action === "stop" && user.focusStart) {
       const mins = Math.floor((Date.now() - user.focusStart) / 60000);
-
       user.minutes += mins;
       user.xp += mins * 3;
 
@@ -283,23 +324,12 @@ client.on("interactionCreate", async interaction => {
       save();
 
       return interaction.reply(
-        `🔥 ${mins} mins\nLevel: ${user.level} (${getRank(user.level)})` +
+        `🔥 ${mins} mins\nLevel: ${user.level}` +
         (leveledUp ? "\n🎉 LEVEL UP!" : "")
       );
     }
   }
 
-  // ===== STATS =====
-  if (interaction.commandName === "stats") {
-    return interaction.reply(
-      `📊 Level: ${user.level} (${getRank(user.level)})
-XP: ${user.xp}
-Minutes: ${user.minutes}
-Streak: ${user.streak}`
-    );
-  }
-
-  // ===== LEADERBOARD =====
   if (interaction.commandName === "leaderboard") {
     const top = Object.entries(data)
       .sort((a, b) => b[1].level - a[1].level)
@@ -313,7 +343,6 @@ Streak: ${user.streak}`
     return interaction.reply(text);
   }
 
-  // ===== STUDY ROOM =====
   if (interaction.commandName === "studyroom") {
     const type = interaction.options.getString("type");
 

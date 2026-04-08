@@ -6,217 +6,206 @@ const {
   SlashCommandBuilder
 } = require("discord.js");
 
-const fetch = require("node-fetch");
+const axios = require("axios");
 const math = require("mathjs");
-const nerdamer = require("nerdamer/all.min");
 
-// ===== CONFIG =====
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-// ===== CLIENT =====
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-// ===== UTIL =====
-function isMath(input) {
-  return /^[\dxyz\+\-\*\/\^\(\)=\s]+$/i.test(input);
-}
-
-// ===== QUADRATIC HANDLER =====
-function solveQuadratic(input) {
-  try {
-    const clean = input.replace(/\s+/g, "");
-
-    if (!clean.includes("x^2")) return null;
-
-    const factored = nerdamer.factor(clean).toString();
-
-    if (factored !== clean) {
-      return {
-        answer: factored,
-        explanation: "Factored quadratic (perfect or general)"
-      };
-    }
-
-    const roots = nerdamer.solveEquations(clean + "=0");
-
-    if (roots && roots.length > 0) {
-      return {
-        answer: `x = ${roots.join(", ")}`,
-        explanation: "Solved quadratic (not factorable)"
-      };
-    }
-
-    return null;
-  } catch (err) {
-    console.log("Quadratic error:", err);
-    return null;
-  }
-}
-
-// ===== INVERSE PROPORTION =====
-function solveInverseProportion(input) {
-  try {
-    // Detect forms like: y = k/x OR y ∝ 1/x
-    if (input.includes("1/x") || input.includes("proportional") || input.includes("∝")) {
-
-      // Basic interpretation
-      return {
-        answer: "y = k / x",
-        explanation: "Inverse proportion detected (y ∝ 1/x)"
-      };
-    }
-
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-// ===== GENERAL MATH =====
-function solveMath(input) {
-  try {
-    const clean = input.replace(/\s+/g, "");
-
-    // EQUATIONS
-    if (clean.includes("=")) {
-      const solved = nerdamer.solveEquations(clean);
-      return {
-        answer: `x = ${solved.join(", ")}`,
-        explanation: "Solved equation"
-      };
-    }
-
-    // EXPAND
-    const expanded = nerdamer(clean).expand().toString();
-    if (expanded !== clean) {
-      return {
-        answer: expanded,
-        explanation: "Expanded expression"
-      };
-    }
-
-    // FACTOR
-    const factored = nerdamer.factor(clean).toString();
-    if (factored !== clean) {
-      return {
-        answer: factored,
-        explanation: "Factored expression"
-      };
-    }
-
-    // CALC
-    const result = math.evaluate(clean);
-
-    return {
-      answer: result.toString(),
-      explanation: "Evaluated"
-    };
-
-  } catch (err) {
-    console.log("Math error:", err);
-    return null;
-  }
-}
-
-// ===== AI =====
+// ================= AI =================
 async function askAI(prompt) {
   try {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
+    const res = await axios.post(
+      "https://api.openai.com/v1/chat/completions",
+      {
         model: "gpt-4o-mini",
-        temperature: 0.2,
         messages: [
           {
             role: "system",
-            content: `Answer STRICTLY:
+            content: `
+You are a powerful AI study tutor.
 
-Answer: <answer>
-
+RULES:
+- Always respond in:
+Answer:
 Explanation:
-<explanation>`
+- Solve math step-by-step
+- Teach clearly
+- Be concise but accurate
+`
           },
           { role: "user", content: prompt }
-        ]
-      })
-    });
+        ],
+        temperature: 0.2
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`
+        }
+      }
+    );
 
-    const json = await res.json();
-
-    return json.choices?.[0]?.message?.content || "No response";
-
-  } catch {
+    return res.data.choices[0].message.content;
+  } catch (err) {
+    console.log(err);
     return "❌ AI error";
   }
 }
 
-// ===== ENGINE =====
-async function engine(input, user) {
-
-  // 1. INVERSE PROPORTION
-  const inv = solveInverseProportion(input);
-  if (inv) return inv;
-
-  // 2. QUADRATIC (PRIORITY)
-  const quad = solveQuadratic(input);
-  if (quad) return quad;
-
-  // 3. MATH
-  if (isMath(input)) {
-    const mathRes = solveMath(input);
-    if (mathRes) return mathRes;
+// ================= MATH =================
+function tryMath(input) {
+  try {
+    const result = math.evaluate(input);
+    return `Answer: ${result}\nExplanation: Calculated using math engine`;
+  } catch {
+    return null;
   }
-
-  // 4. AI
-  const ai = await askAI(input);
-
-  return {
-    answer: ai,
-    explanation: "AI response"
-  };
 }
 
-// ===== COMMAND =====
+// ================= ENGINE =================
+async function engine(input) {
+
+  // 1. MATH FIRST
+  const mathRes = tryMath(input);
+  if (mathRes) return mathRes;
+
+  // 2. AI
+  return await askAI(input);
+}
+
+// ================= QUIZ =================
+async function generateQuiz(topic) {
+  return await askAI(`Create a quiz question about ${topic} with answer and explanation`);
+}
+
+// ================= FLASHCARD =================
+async function generateFlashcard(topic) {
+  return await askAI(`Create a flashcard about ${topic}`);
+}
+
+// ================= COMMANDS =================
 const commands = [
   new SlashCommandBuilder()
     .setName("ask")
-    .setDescription("Ask anything")
+    .setDescription("Ask the AI anything")
     .addStringOption(opt =>
       opt.setName("question")
         .setDescription("Your question")
+        .setRequired(false)
+    )
+    .addAttachmentOption(opt =>
+      opt.setName("image")
+        .setDescription("Upload image")
+        .setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("quiz")
+    .setDescription("Generate a quiz")
+    .addStringOption(opt =>
+      opt.setName("topic")
+        .setDescription("Topic")
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("flashcard")
+    .setDescription("Generate flashcard")
+    .addStringOption(opt =>
+      opt.setName("topic")
+        .setDescription("Topic")
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("study")
+    .setDescription("Start study mode")
+    .addStringOption(opt =>
+      opt.setName("topic")
+        .setDescription("Topic")
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("timer")
+    .setDescription("Focus timer")
+    .addIntegerOption(opt =>
+      opt.setName("minutes")
+        .setDescription("Minutes")
         .setRequired(true)
     )
 ].map(c => c.toJSON());
 
-// REGISTER
+// ================= REGISTER =================
 const rest = new REST({ version: "10" }).setToken(TOKEN);
 
 (async () => {
-  await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+  await rest.put(Routes.applicationCommands(CLIENT_ID), {
+    body: commands
+  });
 })();
 
-// ===== BOT =====
+// ================= BOT =================
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
+  // ASK
   if (interaction.commandName === "ask") {
-    const question = interaction.options.getString("question");
+    const q = interaction.options.getString("question") || "Explain a topic";
+    const img = interaction.options.getAttachment("image");
 
     await interaction.deferReply();
 
-    const result = await engine(question, {});
+    if (img) {
+      const ai = await askAI("Analyze this image and explain it.");
+      return interaction.editReply(ai);
+    }
 
-    await interaction.editReply(
-      `🧠 Answer:\n${result.answer}\n\n📖 Explanation:\n${result.explanation}`
-    );
+    const res = await engine(q);
+    return interaction.editReply(res);
+  }
+
+  // QUIZ
+  if (interaction.commandName === "quiz") {
+    const topic = interaction.options.getString("topic");
+
+    const quiz = await generateQuiz(topic);
+
+    return interaction.reply(`🧠 Quiz:\n${quiz}`);
+  }
+
+  // FLASHCARD
+  if (interaction.commandName === "flashcard") {
+    const topic = interaction.options.getString("topic");
+
+    const card = await generateFlashcard(topic);
+
+    return interaction.reply(`📚 Flashcard:\n${card}`);
+  }
+
+  // STUDY MODE
+  if (interaction.commandName === "study") {
+    const topic = interaction.options.getString("topic");
+
+    const lesson = await askAI(`Teach ${topic} step-by-step like a teacher`);
+
+    return interaction.reply(`📖 Study Mode:\n${lesson}`);
+  }
+
+  // TIMER
+  if (interaction.commandName === "timer") {
+    const minutes = interaction.options.getInteger("minutes");
+
+    await interaction.reply(`⏱ Timer started for ${minutes} minutes`);
+
+    setTimeout(() => {
+      interaction.followUp("⏰ Time’s up!");
+    }, minutes * 60000);
   }
 });
 

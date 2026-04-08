@@ -11,6 +11,7 @@ const fetch = require("node-fetch");
 const math = require("mathjs");
 const nerdamer = require("nerdamer/all.min");
 
+// ===== CLIENT =====
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
@@ -44,93 +45,93 @@ function checkLevel(user) {
   }
 }
 
-// ===== DETECT =====
-function detectType(input) {
-  const text = input.toLowerCase();
-
-  if (/[\dxyz\+\-\*\/\^\(\)=]/.test(input)) return "math";
-  if (text.startsWith("quiz ")) return "quiz";
-  if (text.startsWith("flashcard ")) return "flashcard";
-
-  return "ai";
-}
-
-// ===== MATH ENGINE =====
+// ===== MATH + ALGEBRA =====
 function isMath(input) {
   return /^[\dxyz\+\-\*\/\^\(\)=\s]+$/i.test(input);
 }
 
+function detectIdentity(input) {
+  const expr = input.replace(/\s+/g, "");
+
+  if (/\(.+\+\.+\)\^2/.test(expr)) {
+    return { answer: "a^2 + 2ab + b^2", explanation: "(a + b)^2 identity" };
+  }
+
+  if (/\(.+\-.*\)\^2/.test(expr)) {
+    return { answer: "a^2 - 2ab + b^2", explanation: "(a - b)^2 identity" };
+  }
+
+  if (/\(.+\+.+\)\(.+\-.*\)/.test(expr)) {
+    return { answer: "a^2 - b^2", explanation: "(a + b)(a - b) identity" };
+  }
+
+  return null;
+}
+
 function handleMath(input) {
   try {
-    // Solve equation
     if (input.includes("=")) {
-      const result = nerdamer.solveEquations(input);
+      const solved = nerdamer.solveEquations(input);
       return {
-        answer: `x = ${result.join(", ")}`,
-        explanation: "Solved using algebra engine"
+        answer: `x = ${solved.join(", ")}`,
+        explanation: "Solved algebraically"
       };
     }
 
-    // Factor
     const factored = nerdamer.factor(input).toString();
     if (factored !== input) {
       return {
         answer: factored,
-        explanation: "Factored using symbolic math"
+        explanation: "Factored expression"
       };
     }
 
-    // Expand
-    const expanded = nerdamer.expand(input).toString();
-
+    const result = math.evaluate(input);
     return {
-      answer: expanded,
-      explanation: "Expanded expression"
+      answer: result.toString(),
+      explanation: "Evaluated"
     };
-
   } catch {
     return null;
   }
 }
 
 // ===== QUIZ =====
-function makeQuiz(topic, user) {
+function quiz(topic, user) {
   return {
     answer: `📚 Quiz: ${topic}`,
-    explanation: `
-Level: ${user.level}
-
-${user.level < 3 ? `
-1. What is ${topic}?
-2. Give a simple example.
-` : `
-1. Explain ${topic} in detail
-2. Give real-world application
-3. Solve a problem
-`}
-`
+    explanation: `Level ${user.level}\n\nExplain ${topic} in your own words.`
   };
 }
 
 // ===== FLASHCARDS =====
-function makeFlashcards(topic) {
+function flashcards(topic) {
   return {
     answer: `🧾 Flashcards: ${topic}`,
-    explanation: `
-Q: What is ${topic}?
-A: Definition
-
-Q: Key concept?
-A: Core idea
-
-Q: Example?
-A: Usage
-`
+    explanation: `Q: What is ${topic}?\nA: (Think and recall)`
   };
 }
 
-// ===== STRICT AI =====
-async function askAI(prompt, user) {
+// ===== TIMER =====
+const timers = new Map();
+
+function startTimer(userId, mins) {
+  timers.set(userId, Date.now() + mins * 60000);
+  return `⏱️ Timer set for ${mins} minutes`;
+}
+
+function checkTimer(userId) {
+  if (!timers.has(userId)) return null;
+  const remaining = timers.get(userId) - Date.now();
+  if (remaining <= 0) {
+    timers.delete(userId);
+    return "⏰ Time's up!";
+  }
+  return `⏳ ${Math.ceil(remaining / 1000)}s left`;
+}
+
+// ===== AI =====
+async function askAI(prompt) {
   try {
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -144,16 +145,12 @@ async function askAI(prompt, user) {
         messages: [
           {
             role: "system",
-            content: `
-STRICT FORMAT:
+            content: `STRICT FORMAT ONLY:
 
 Answer: <answer>
 
 Explanation:
-<explanation>
-
-No extra text.
-            `
+<explanation>`
           },
           { role: "user", content: prompt }
         ]
@@ -170,26 +167,39 @@ No extra text.
 // ===== ENGINE =====
 async function engine(input, user) {
 
-  // ⚡ MATH FIRST
+  // 🧠 Algebra identity FIRST
+  const identity = detectIdentity(input);
+  if (identity) return identity;
+
+  // ⚡ Math
   if (isMath(input)) {
-    const mathResult = handleMath(input);
-    if (mathResult) return mathResult;
+    const mathRes = handleMath(input);
+    if (mathRes) return mathRes;
   }
 
-  const type = detectType(input);
-
-  if (type === "quiz") {
-    const topic = input.replace("quiz", "").trim();
-    return makeQuiz(topic, user);
+  // 📚 Quiz
+  if (input.startsWith("quiz ")) {
+    const topic = input.replace("quiz ", "");
+    return quiz(topic, user);
   }
 
-  if (type === "flashcard") {
-    const topic = input.replace("flashcard", "").trim();
-    return makeFlashcards(topic);
+  // 🧾 Flashcards
+  if (input.startsWith("flashcards ")) {
+    const topic = input.replace("flashcards ", "");
+    return flashcards(topic);
   }
 
-  // 🤖 AI
-  const ai = await askAI(input, user);
+  // ⏱️ Timer
+  if (input.startsWith("timer ")) {
+    const mins = parseInt(input.replace("timer ", ""));
+    return {
+      answer: startTimer(user.id, mins),
+      explanation: "Timer started"
+    };
+  }
+
+  // 🤖 AI fallback
+  const ai = await askAI(input);
 
   return {
     answer: ai,
@@ -197,7 +207,7 @@ async function engine(input, user) {
   };
 }
 
-// ===== COMMANDS =====
+// ===== COMMAND =====
 const commands = [
   new SlashCommandBuilder()
     .setName("ask")
@@ -225,7 +235,7 @@ client.on("interactionCreate", async interaction => {
 
     await interaction.deferReply();
 
-    const result = await engine(question, user);
+    const result = await engine(question, { ...user, id: interaction.user.id });
 
     user.xp += 10;
     checkLevel(user);

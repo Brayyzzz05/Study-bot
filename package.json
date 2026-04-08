@@ -1,13 +1,12 @@
 {
-  "name": "study-ai-bot",
-  "version": "5.0.0",
+  "name": "study-bot",
+  "version": "2.0.0",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "discord.js": "^14.14.1",
-    "mathjs": "^12.4.0",
-    "axios": "^1.6.0"
+    "axios": "^1.6.0",
+    "discord.js": "^14.14.1"
   }
 }

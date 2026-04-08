@@ -1,3 +1,4 @@
+// ================= BOT (index.js) =================
 const {
   Client,
   GatewayIntentBits,
@@ -17,7 +18,6 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const BACKEND_URL = process.env.BACKEND_URL;
 
 // ================= COMMANDS =================
-
 const commands = [
   new SlashCommandBuilder()
     .setName("ask")
@@ -55,7 +55,7 @@ const commands = [
     .setDescription("Reset memory")
 ].map(c => c.toJSON());
 
-// REGISTER
+// ================= REGISTER =================
 const rest = new REST({ version: "10" }).setToken(TOKEN);
 
 (async () => {
@@ -80,10 +80,14 @@ client.on("interactionCreate", async interaction => {
       const attachment = interaction.options.getAttachment("image");
 
       if (attachment) {
-        const res = await axios.post(`${BACKEND_URL}/image`, {
-          imageUrl: attachment.url,
-          prompt: question || "Explain this"
-        });
+        const res = await axios.post(
+          `${BACKEND_URL}/image`,
+          {
+            imageUrl: attachment.url,
+            prompt: question || "Explain this"
+          },
+          { timeout: 10000 }
+        );
 
         return interaction.editReply(`🖼️ ${res.data.reply}`);
       }
@@ -92,10 +96,14 @@ client.on("interactionCreate", async interaction => {
         return interaction.editReply("❌ Enter a question");
       }
 
-      const res = await axios.post(`${BACKEND_URL}/chat`, {
-        userId: interaction.user.id,
-        message: question
-      });
+      const res = await axios.post(
+        `${BACKEND_URL}/chat`,
+        {
+          userId: interaction.user.id,
+          message: question
+        },
+        { timeout: 10000 }
+      );
 
       return interaction.editReply(`🧠 ${res.data.reply}`);
     }
@@ -104,9 +112,7 @@ client.on("interactionCreate", async interaction => {
     if (interaction.commandName === "quiz") {
       const topic = interaction.options.getString("topic");
 
-      const res = await axios.post(`${BACKEND_URL}/quiz`, {
-        topic
-      });
+      const res = await axios.post(`${BACKEND_URL}/quiz`, { topic });
 
       return interaction.editReply(`🧪 ${res.data.reply}`);
     }
@@ -115,9 +121,7 @@ client.on("interactionCreate", async interaction => {
     if (interaction.commandName === "flashcard") {
       const topic = interaction.options.getString("topic");
 
-      const res = await axios.post(`${BACKEND_URL}/flashcard`, {
-        topic
-      });
+      const res = await axios.post(`${BACKEND_URL}/flashcard`, { topic });
 
       return interaction.editReply(`🃏 ${res.data.reply}`);
     }
@@ -156,7 +160,7 @@ client.on("interactionCreate", async interaction => {
   }
 });
 
-// START
+// ================= START =================
 client.once("ready", () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 });

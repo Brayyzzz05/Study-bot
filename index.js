@@ -1,6 +1,7 @@
 const {
   Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder,
-  ActionRowBuilder, ButtonBuilder, ButtonStyle
+  ActionRowBuilder, ButtonBuilder, ButtonStyle,
+  EmbedBuilder
 } = require("discord.js");
 
 const fs = require("fs");
@@ -29,27 +30,21 @@ function getUser(id) {
   return data[id];
 }
 
-// ===== CACHE =====
-let cache = {};
-const getCache = k => cache[k];
-const setCache = (k, v) => cache[k] = v;
-
 // ===== QUICK ANSWER =====
 function quickAnswer(input) {
   const text = input.toLowerCase().trim();
 
   if (/^[0-9+\-*/().\s]+$/.test(text)) {
     try {
-      return "🧠 " + Function(`return (${text})`)();
+      return Function(`return (${text})`)();
     } catch {}
   }
 
-  if (text === "hi") return "👋 Hello!";
   return null;
 }
 
-// ===== AI =====
-async function askText(prompt, memory) {
+// ===== AI TEXT =====
+async function askFormatted(prompt, memory) {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8000);
@@ -64,7 +59,17 @@ async function askText(prompt, memory) {
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages: [
-          { role: "system", content: "Answer clearly and shortly." },
+          {
+            role: "system",
+            content: `
+Always reply in this format:
+
+Answer: <answer>
+
+Explanation:
+<steps>
+            `
+          },
           ...memory.slice(-2),
           { role: "user", content: prompt }
         ]
@@ -73,13 +78,53 @@ async function askText(prompt, memory) {
 
     clearTimeout(timeout);
 
-    if (!res.ok) return "⚠️ API error";
-
     const json = await res.json();
-    return json.choices?.[0]?.message?.content || "⚠️ No response";
+    return json.choices?.[0]?.message?.content || "No response";
 
   } catch {
     return "⚠️ AI timeout";
+  }
+}
+
+// ===== AI IMAGE =====
+async function askWithImage(prompt, imageUrl) {
+  try {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `
+Answer in format:
+
+Answer: <answer>
+
+Explanation:
+<steps>
+            `
+          },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: prompt || "Solve this" },
+              { type: "image_url", image_url: { url: imageUrl } }
+            ]
+          }
+        ]
+      })
+    });
+
+    const json = await res.json();
+    return json.choices?.[0]?.message?.content || "No response";
+
+  } catch {
+    return "⚠️ Image AI failed";
   }
 }
 
@@ -97,7 +142,7 @@ async function generateQuiz(topic) {
         messages: [
           {
             role: "system",
-            content: "Return ONLY valid JSON like: [{\"q\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"],\"answer\":\"A\"}]"
+            content: "Return JSON: [{\"q\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"],\"answer\":\"A\"}]"
           },
           { role: "user", content: topic }
         ]
@@ -105,32 +150,27 @@ async function generateQuiz(topic) {
     });
 
     const json = await res.json();
+    return JSON.parse(json.choices[0].message.content);
 
-    const content = json.choices?.[0]?.message?.content;
-    if (!content) return null;
-
-    const parsed = JSON.parse(content);
-
-    // ✅ ensure strings
-    parsed[0].options = parsed[0].options.map(o => String(o));
-
-    return parsed;
-
-  } catch (err) {
-    console.error("QUIZ ERROR:", err);
+  } catch {
     return null;
   }
 }
 
-// ===== COMMANDS (FIXED) =====
+// ===== COMMANDS =====
 const commands = [
   new SlashCommandBuilder()
     .setName("ask")
-    .setDescription("Ask AI")
+    .setDescription("Ask AI (text or image)")
     .addStringOption(o =>
       o.setName("question")
-        .setDescription("Your question") // ✅ FIXED
-        .setRequired(true)
+        .setDescription("Your question")
+        .setRequired(false)
+    )
+    .addAttachmentOption(o =>
+      o.setName("image")
+        .setDescription("Upload image")
+        .setRequired(false)
     ),
 
   new SlashCommandBuilder()
@@ -138,16 +178,16 @@ const commands = [
     .setDescription("Interactive quiz")
     .addStringOption(o =>
       o.setName("topic")
-        .setDescription("Quiz topic") // ✅ FIXED
+        .setDescription("Quiz topic")
         .setRequired(true)
     ),
 
   new SlashCommandBuilder()
     .setName("flashcards")
-    .setDescription("Flashcards")
+    .setDescription("Generate flashcards")
     .addStringOption(o =>
       o.setName("topic")
-        .setDescription("Flashcard topic") // ✅ FIXED
+        .setDescription("Topic")
         .setRequired(true)
     ),
 
@@ -165,10 +205,10 @@ const rest = new REST({ version: "10" }).setToken(TOKEN);
 // ===== QUIZ STATE =====
 let activeQuizzes = {};
 
-// ===== HANDLER =====
+// ===== INTERACTIONS =====
 client.on("interactionCreate", async interaction => {
 
-  // ===== BUTTONS =====
+  // BUTTON HANDLING
   if (interaction.isButton()) {
     const [quizId, choice] = interaction.customId.split("_");
     const quiz = activeQuizzes[quizId];
@@ -195,20 +235,45 @@ client.on("interactionCreate", async interaction => {
   // ===== ASK =====
   if (interaction.commandName === "ask") {
     const question = interaction.options.getString("question");
+    const image = interaction.options.getAttachment("image");
 
     await interaction.deferReply();
 
-    const quick = quickAnswer(question);
-    if (quick) return interaction.editReply(quick);
+    let result;
 
-    const cached = getCache(question);
-    if (cached) return interaction.editReply("⚡ " + cached);
+    if (image) {
+      result = await askWithImage(question, image.url);
+    } else if (question) {
+      const quick = quickAnswer(question);
 
-    const res = await askText(question, user.memory);
+      if (quick !== null) {
+        result = `Answer: ${quick}\n\nExplanation:\nCalculated instantly.`;
+      } else {
+        result = await askFormatted(question, user.memory);
+      }
+    } else {
+      return interaction.editReply("❌ Provide a question or image");
+    }
 
-    setCache(question, res);
+    // CLEAN EMBED UI
+    const [answerPart, explanationPart] = result.split("Explanation:");
 
-    return interaction.editReply(res);
+    const embed = new EmbedBuilder()
+      .setTitle("🧠 AI Answer")
+      .setColor(0x5865F2)
+      .addFields(
+        {
+          name: "✅ Answer",
+          value: answerPart.replace("Answer:", "").trim() || "No answer"
+        },
+        {
+          name: "📘 Explanation",
+          value: explanationPart?.trim() || "No explanation"
+        }
+      )
+      .setFooter({ text: "Study Bot" });
+
+    return interaction.editReply({ embeds: [embed] });
   }
 
   // ===== QUIZ =====
@@ -221,21 +286,26 @@ client.on("interactionCreate", async interaction => {
     if (!quizData) return interaction.editReply("❌ Failed to generate quiz");
 
     const q = quizData[0];
-    const quizId = Date.now().toString();
+    const id = Date.now().toString();
 
-    activeQuizzes[quizId] = { answer: String(q.answer) };
+    activeQuizzes[id] = { answer: q.answer };
 
     const row = new ActionRowBuilder().addComponents(
       q.options.map(opt =>
         new ButtonBuilder()
-          .setCustomId(`${quizId}_${opt}`)
-          .setLabel(String(opt)) // ✅ FORCE STRING
+          .setCustomId(`${id}_${opt}`)
+          .setLabel(opt)
           .setStyle(ButtonStyle.Primary)
       )
     );
 
+    const embed = new EmbedBuilder()
+      .setTitle("📝 Quiz")
+      .setDescription(q.q)
+      .setColor(0x00C896);
+
     return interaction.editReply({
-      content: `📝 ${q.q}`,
+      embeds: [embed],
       components: [row]
     });
   }
@@ -246,8 +316,14 @@ client.on("interactionCreate", async interaction => {
 
     await interaction.deferReply();
 
-    const res = await askText(`Create flashcards for ${topic}`, []);
-    return interaction.editReply(res);
+    const res = await askFormatted(`Create flashcards for ${topic}`, []);
+
+    const embed = new EmbedBuilder()
+      .setTitle("🧾 Flashcards")
+      .setDescription(res)
+      .setColor(0xF39C12);
+
+    return interaction.editReply({ embeds: [embed] });
   }
 
   // ===== SCORE =====

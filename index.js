@@ -1,27 +1,20 @@
-const {
-  Client,
-  GatewayIntentBits,
-  REST,
-  Routes,
-  SlashCommandBuilder
-} = require("discord.js");
-
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require("discord.js");
 const fs = require("fs");
 const fetch = require("node-fetch");
 const math = require("mathjs");
 const nerdamer = require("nerdamer/all.min");
+
+// ===== CONFIG =====
+const TOKEN = process.env.TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 // ===== CLIENT =====
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-// ===== ENV =====
-const TOKEN = process.env.TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-
-// ===== DATABASE =====
+// ===== STORAGE =====
 let data = {};
 if (fs.existsSync("data.json")) {
   data = JSON.parse(fs.readFileSync("data.json"));
@@ -33,74 +26,70 @@ function save() {
 
 function getUser(id) {
   if (!data[id]) {
-    data[id] = { xp: 0, level: 1, memory: [] };
+    data[id] = { xp: 0, level: 1 };
   }
   return data[id];
 }
 
-function checkLevel(user) {
+function levelUp(user) {
   if (user.xp >= user.level * 100) {
     user.level++;
     user.xp = 0;
   }
 }
 
-// ===== MATH + ALGEBRA =====
+// ===== INPUT CHECK =====
 function isMath(input) {
   return /^[\dxyz\+\-\*\/\^\(\)=\s]+$/i.test(input);
 }
 
-function detectIdentity(input) {
-  const expr = input.replace(/\s+/g, "");
-
-  if (/\(.+\+\.+\)\^2/.test(expr)) {
-    return { answer: "a^2 + 2ab + b^2", explanation: "(a + b)^2 identity" };
-  }
-
-  if (/\(.+\-.*\)\^2/.test(expr)) {
-    return { answer: "a^2 - 2ab + b^2", explanation: "(a - b)^2 identity" };
-  }
-
-  if (/\(.+\+.+\)\(.+\-.*\)/.test(expr)) {
-    return { answer: "a^2 - b^2", explanation: "(a + b)(a - b) identity" };
-  }
-
-  return null;
-}
-
-function handleMath(input) {
+// ===== FACTOR DETECTION (CORE FIX) =====
+function analyzeExpression(input) {
   try {
-    if (input.includes("=")) {
-      const solved = nerdamer.solveEquations(input);
-      return {
-        answer: `x = ${solved.join(", ")}`,
-        explanation: "Solved algebraically"
-      };
-    }
+    const clean = input.replace(/\s+/g, "");
 
-    const factored = nerdamer.factor(input).toString();
-    if (factored !== input) {
+    const factored = nerdamer.factor(clean).toString();
+
+    // ✅ If factoring changed → factorable
+    if (factored !== clean) {
       return {
         answer: factored,
-        explanation: "Factored expression"
+        explanation: "This expression is factorable"
       };
     }
 
-    const result = math.evaluate(input);
+    // ❌ Try solving
+    if (clean.includes("x")) {
+      const roots = nerdamer.solveEquations(clean + "=0");
+
+      if (roots && roots.length > 0) {
+        return {
+          answer: `Roots: ${roots.join(", ")}`,
+          explanation: "Not factorable into simple integers, but solvable"
+        };
+      }
+    }
+
     return {
-      answer: result.toString(),
-      explanation: "Evaluated"
+      answer: clean,
+      explanation: "Not factorable"
     };
-  } catch {
-    return null;
+
+  } catch (err) {
+    console.log("MATH ERROR:", err);
+
+    return {
+      answer: "❌ Error",
+      explanation: "Math processing failed"
+    };
   }
 }
 
 // ===== QUIZ =====
 function quiz(topic, user) {
   return {
-    answer: `📚 Quiz: ${topic}`,
-    explanation: `Level ${user.level}\n\nExplain ${topic} in your own words.`
+    answer: `📚 Quiz started: ${topic}`,
+    explanation: `Explain ${topic} in detail.`
   };
 }
 
@@ -108,7 +97,7 @@ function quiz(topic, user) {
 function flashcards(topic) {
   return {
     answer: `🧾 Flashcards: ${topic}`,
-    explanation: `Q: What is ${topic}?\nA: (Think and recall)`
+    explanation: `Q: What is ${topic}?\nA: (Try to recall)`
   };
 }
 
@@ -117,17 +106,12 @@ const timers = new Map();
 
 function startTimer(userId, mins) {
   timers.set(userId, Date.now() + mins * 60000);
-  return `⏱️ Timer set for ${mins} minutes`;
-}
 
-function checkTimer(userId) {
-  if (!timers.has(userId)) return null;
-  const remaining = timers.get(userId) - Date.now();
-  if (remaining <= 0) {
+  setTimeout(() => {
     timers.delete(userId);
-    return "⏰ Time's up!";
-  }
-  return `⏳ ${Math.ceil(remaining / 1000)}s left`;
+  }, mins * 60000);
+
+  return `⏱️ Timer set for ${mins} minutes`;
 }
 
 // ===== AI =====
@@ -145,7 +129,7 @@ async function askAI(prompt) {
         messages: [
           {
             role: "system",
-            content: `STRICT FORMAT ONLY:
+            content: `STRICT FORMAT:
 
 Answer: <answer>
 
@@ -157,36 +141,37 @@ Explanation:
       })
     });
 
-    const json = await res.json();
-    return json.choices?.[0]?.message?.content || "No response";
-  } catch {
-    return "❌ AI error";
+    const data = await res.json();
+
+    if (!data.choices || !data.choices[0]) {
+      return "⚠️ No AI response";
+    }
+
+    return data.choices[0].message.content;
+
+  } catch (err) {
+    console.log("AI ERROR:", err);
+    return "❌ AI failed";
   }
 }
 
 // ===== ENGINE =====
 async function engine(input, user) {
+  input = input.toLowerCase();
 
-  // 🧠 Algebra identity FIRST
-  const identity = detectIdentity(input);
-  if (identity) return identity;
-
-  // ⚡ Math
+  // 🧠 Math FIRST
   if (isMath(input)) {
-    const mathRes = handleMath(input);
-    if (mathRes) return mathRes;
+    return analyzeExpression(input);
   }
 
   // 📚 Quiz
   if (input.startsWith("quiz ")) {
-    const topic = input.replace("quiz ", "");
-    return quiz(topic, user);
+    return quiz(input.replace("quiz ", ""), user);
   }
 
   // 🧾 Flashcards
   if (input.startsWith("flashcards ")) {
-    const topic = input.replace("flashcards ", "");
-    return flashcards(topic);
+    return flashcards(input.replace("flashcards ", ""));
   }
 
   // ⏱️ Timer
@@ -212,15 +197,16 @@ const commands = [
   new SlashCommandBuilder()
     .setName("ask")
     .setDescription("Ask anything")
-    .addStringOption(o =>
-      o.setName("question")
+    .addStringOption(option =>
+      option.setName("question")
         .setDescription("Your question")
         .setRequired(true)
     )
-].map(c => c.toJSON());
+].map(cmd => cmd.toJSON());
 
-// REGISTER
+// ===== REGISTER =====
 const rest = new REST({ version: "10" }).setToken(TOKEN);
+
 (async () => {
   await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
 })();
@@ -238,8 +224,7 @@ client.on("interactionCreate", async interaction => {
     const result = await engine(question, { ...user, id: interaction.user.id });
 
     user.xp += 10;
-    checkLevel(user);
-
+    levelUp(user);
     save();
 
     await interaction.editReply(

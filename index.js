@@ -10,10 +10,11 @@ const client = new Client({
 
 const BACKEND = process.env.BACKEND_URL;
 
-let activeQuiz = new Map();
+// Store active quizzes per user
+const activeQuiz = new Map();
 
 // =====================
-// READY EVENT (FIXED WARNING)
+// READY
 // =====================
 client.once("clientReady", () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
@@ -26,53 +27,38 @@ client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
 
   const args = message.content.trim().split(" ");
-  const cmd = args.shift().toLowerCase();
+  const cmd = args.shift()?.toLowerCase();
 
   // =====================
-  // 🧠 ASK
+  // 🧠 ASK (AI)
   // =====================
   if (cmd === "/ask") {
-    const text = args.join(" ");
+    const question = args.join(" ");
 
-    if (!text) return message.reply("❌ Ask a question");
+    if (!question) {
+      return message.reply("❌ Please ask a question.");
+    }
 
     try {
       const res = await fetch(`${BACKEND}/chat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text })
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ message: question })
       });
 
       const data = await res.json();
-      message.reply(data.reply);
+
+      if (!data || !data.reply) {
+        return message.reply("❌ No response from AI.");
+      }
+
+      message.reply(data.reply.slice(0, 1900));
 
     } catch (err) {
-      message.reply("❌ Failed to contact backend");
-    }
-  }
-
-  // =====================
-  // 📸 IMAGE
-  // =====================
-  if (cmd === "/image") {
-    const attachment = message.attachments.first();
-
-    if (!attachment) {
-      return message.reply("❌ Attach an image");
-    }
-
-    try {
-      const res = await fetch(`${BACKEND}/image`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: attachment.url })
-      });
-
-      const data = await res.json();
-      message.reply(data.reply);
-
-    } catch (err) {
-      message.reply("❌ Image error");
+      console.error(err);
+      message.reply("❌ Failed to contact backend.");
     }
   }
 
@@ -82,64 +68,110 @@ client.on("messageCreate", async (message) => {
   if (cmd === "/flashcard") {
     const sub = args.shift();
 
-    // ADD
+    // ADD FLASHCARD
     if (sub === "add") {
-      const [q, a] = args.join(" ").split("|");
+      const input = args.join(" ");
+      const [question, answer] = input.split("|");
 
-      if (!q || !a) {
-        return message.reply("❌ Format: /flashcard add question|answer");
+      if (!question || !answer) {
+        return message.reply("❌ Use: /flashcard add question|answer");
       }
 
-      await fetch(`${BACKEND}/flashcard/add`, {
+      try {
+        await fetch(`${BACKEND}/flashcard/add`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            userId: message.author.id,
+            question: question.trim(),
+            answer: answer.trim()
+          })
+        });
+
+        message.reply("✅ Flashcard saved");
+
+      } catch {
+        message.reply("❌ Failed to save flashcard");
+      }
+    }
+
+    // QUIZ FROM FLASHCARDS
+    if (sub === "quiz") {
+      try {
+        const res = await fetch(`${BACKEND}/flashcard/random`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId: message.author.id })
+        });
+
+        const data = await res.json();
+
+        if (!data.question) {
+          return message.reply("❌ No flashcards found.");
+        }
+
+        activeQuiz.set(message.author.id, data.answer);
+
+        message.reply(`❓ ${data.question}`);
+
+      } catch {
+        message.reply("❌ Quiz error");
+      }
+    }
+
+    // ANSWER QUIZ
+    if (sub === "answer") {
+      const answer = args.join(" ");
+      const correct = activeQuiz.get(message.author.id);
+
+      if (!correct) {
+        return message.reply("❌ No active quiz.");
+      }
+
+      try {
+        const res = await fetch(`${BACKEND}/quiz/check`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ correct, answer })
+        });
+
+        const data = await res.json();
+
+        message.reply(data.reply);
+
+        activeQuiz.delete(message.author.id);
+
+      } catch {
+        message.reply("❌ Failed to check answer");
+      }
+    }
+  }
+
+  // =====================
+  // 🧪 QUICK QUIZ (AI GENERATED)
+  // =====================
+  if (cmd === "/quiz") {
+    const topic = args.join(" ");
+
+    if (!topic) {
+      return message.reply("❌ Provide a topic. Example: /quiz algebra");
+    }
+
+    try {
+      const res = await fetch(`${BACKEND}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          userId: message.author.id,
-          question: q,
-          answer: a
+          message: `Create 1 short quiz question with answer on: ${topic}`
         })
       });
 
-      return message.reply("✅ Saved");
-    }
-
-    // QUIZ
-    if (sub === "quiz") {
-      const res = await fetch(`${BACKEND}/flashcard/random`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId: message.author.id })
-      });
-
       const data = await res.json();
 
-      if (!data.question) {
-        return message.reply("❌ No flashcards");
-      }
-
-      activeQuiz.set(message.author.id, data.answer);
-      message.reply(`❓ ${data.question}`);
-    }
-
-    // ANSWER
-    if (sub === "answer") {
-      const correct = activeQuiz.get(message.author.id);
-      const answer = args.join(" ");
-
-      if (!correct) {
-        return message.reply("❌ No active quiz");
-      }
-
-      const res = await fetch(`${BACKEND}/quiz/check`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ correct, answer })
-      });
-
-      const data = await res.json();
-
-      activeQuiz.delete(message.author.id);
       message.reply(data.reply);
+
+    } catch {
+      message.reply("❌ Failed to generate quiz");
     }
   }
 
@@ -150,13 +182,13 @@ client.on("messageCreate", async (message) => {
     const mins = parseInt(args[0]);
 
     if (isNaN(mins)) {
-      return message.reply("❌ Use /timer 5");
+      return message.reply("❌ Use: /timer 5");
     }
 
-    message.reply(`⏱ Timer: ${mins} minutes`);
+    message.reply(`⏱ Timer started: ${mins} minutes`);
 
     setTimeout(() => {
-      message.reply("⏰ Time’s up!");
+      message.reply("⏰ Time's up!");
     }, mins * 60000);
   }
 
@@ -165,8 +197,11 @@ client.on("messageCreate", async (message) => {
   // =====================
   if (cmd === "/reset") {
     activeQuiz.delete(message.author.id);
-    message.reply("🔄 Reset done");
+    message.reply("🔄 Session reset");
   }
 });
 
+// =====================
+// LOGIN
+// =====================
 client.login(process.env.DISCORD_TOKEN);

@@ -9,7 +9,6 @@ const {
 const fetch = require("node-fetch");
 const math = require("mathjs");
 const nerdamer = require("nerdamer/all.min");
-const fs = require("fs");
 
 // ===== CONFIG =====
 const TOKEN = process.env.TOKEN;
@@ -21,34 +20,63 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-// ===== DATA =====
-let data = {};
-if (fs.existsSync("data.json")) {
-  data = JSON.parse(fs.readFileSync("data.json"));
-}
-
-function save() {
-  fs.writeFileSync("data.json", JSON.stringify(data, null, 2));
-}
-
-function getUser(id) {
-  if (!data[id]) data[id] = { xp: 0, level: 1 };
-  return data[id];
-}
-
-function levelUp(user) {
-  if (user.xp >= user.level * 100) {
-    user.level++;
-    user.xp = 0;
-  }
-}
-
 // ===== UTIL =====
 function isMath(input) {
   return /^[\dxyz\+\-\*\/\^\(\)=\s]+$/i.test(input);
 }
 
-// ===== MATH ENGINE =====
+// ===== QUADRATIC HANDLER =====
+function solveQuadratic(input) {
+  try {
+    const clean = input.replace(/\s+/g, "");
+
+    if (!clean.includes("x^2")) return null;
+
+    const factored = nerdamer.factor(clean).toString();
+
+    if (factored !== clean) {
+      return {
+        answer: factored,
+        explanation: "Factored quadratic (perfect or general)"
+      };
+    }
+
+    const roots = nerdamer.solveEquations(clean + "=0");
+
+    if (roots && roots.length > 0) {
+      return {
+        answer: `x = ${roots.join(", ")}`,
+        explanation: "Solved quadratic (not factorable)"
+      };
+    }
+
+    return null;
+  } catch (err) {
+    console.log("Quadratic error:", err);
+    return null;
+  }
+}
+
+// ===== INVERSE PROPORTION =====
+function solveInverseProportion(input) {
+  try {
+    // Detect forms like: y = k/x OR y ∝ 1/x
+    if (input.includes("1/x") || input.includes("proportional") || input.includes("∝")) {
+
+      // Basic interpretation
+      return {
+        answer: "y = k / x",
+        explanation: "Inverse proportion detected (y ∝ 1/x)"
+      };
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// ===== GENERAL MATH =====
 function solveMath(input) {
   try {
     const clean = input.replace(/\s+/g, "");
@@ -80,89 +108,18 @@ function solveMath(input) {
       };
     }
 
-    // ROOTS
-    if (clean.includes("x")) {
-      const roots = nerdamer.solveEquations(clean + "=0");
-      if (roots?.length) {
-        return {
-          answer: `Roots: ${roots.join(", ")}`,
-          explanation: "Solved algebraically"
-        };
-      }
-    }
-
-    // BASIC CALC
+    // CALC
     const result = math.evaluate(clean);
 
     return {
       answer: result.toString(),
-      explanation: "Calculated"
+      explanation: "Evaluated"
     };
 
   } catch (err) {
-    console.log("MATH ERROR:", err);
-    return {
-      answer: "❌ Math error",
-      explanation: "Could not solve"
-    };
+    console.log("Math error:", err);
+    return null;
   }
-}
-
-// ===== PHOTO ANALYSIS =====
-async function analyzeImage(url) {
-  try {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "user",
-            content: [
-              { type: "text", text: "Solve or describe this image." },
-              { type: "image_url", image_url: { url } }
-            ]
-          }
-        ]
-      })
-    });
-
-    const json = await res.json();
-
-    return json.choices?.[0]?.message?.content || "❌ No image result";
-
-  } catch (err) {
-    console.log("IMAGE ERROR:", err);
-    return "❌ Image analysis failed";
-  }
-}
-
-// ===== QUIZ =====
-function quiz(topic) {
-  return {
-    answer: `📚 Quiz: ${topic}`,
-    explanation: `Explain ${topic}`
-  };
-}
-
-// ===== FLASHCARDS =====
-function flashcards(topic) {
-  return {
-    answer: `🧾 Flashcards: ${topic}`,
-    explanation: `Q: What is ${topic}?\nA: (Think)`
-  };
-}
-
-// ===== TIMER =====
-const timers = new Map();
-
-function startTimer(userId, mins) {
-  timers.set(userId, Date.now() + mins * 60000);
-  return `⏱️ Timer set for ${mins} minutes`;
 }
 
 // ===== AI =====
@@ -192,9 +149,9 @@ Explanation:
       })
     });
 
-    const data = await res.json();
+    const json = await res.json();
 
-    return data.choices?.[0]?.message?.content || "No response";
+    return json.choices?.[0]?.message?.content || "No response";
 
   } catch {
     return "❌ AI error";
@@ -202,42 +159,23 @@ Explanation:
 }
 
 // ===== ENGINE =====
-async function engine(input, user, attachmentUrl) {
+async function engine(input, user) {
 
-  // 📷 IMAGE FIRST
-  if (attachmentUrl) {
-    const img = await analyzeImage(attachmentUrl);
-    return {
-      answer: img,
-      explanation: "Image analyzed"
-    };
-  }
+  // 1. INVERSE PROPORTION
+  const inv = solveInverseProportion(input);
+  if (inv) return inv;
 
-  // 🧠 MATH
+  // 2. QUADRATIC (PRIORITY)
+  const quad = solveQuadratic(input);
+  if (quad) return quad;
+
+  // 3. MATH
   if (isMath(input)) {
-    return solveMath(input);
+    const mathRes = solveMath(input);
+    if (mathRes) return mathRes;
   }
 
-  // 📚 QUIZ
-  if (input.startsWith("quiz ")) {
-    return quiz(input.replace("quiz ", ""));
-  }
-
-  // 🧾 FLASHCARDS
-  if (input.startsWith("flashcards ")) {
-    return flashcards(input.replace("flashcards ", ""));
-  }
-
-  // ⏱️ TIMER
-  if (input.startsWith("timer ")) {
-    const mins = parseInt(input.replace("timer ", ""));
-    return {
-      answer: startTimer(user.id, mins),
-      explanation: "Timer started"
-    };
-  }
-
-  // 🤖 AI
+  // 4. AI
   const ai = await askAI(input);
 
   return {
@@ -252,12 +190,15 @@ const commands = [
     .setName("ask")
     .setDescription("Ask anything")
     .addStringOption(opt =>
-      opt.setName("question").setDescription("Your question").setRequired(true)
+      opt.setName("question")
+        .setDescription("Your question")
+        .setRequired(true)
     )
 ].map(c => c.toJSON());
 
 // REGISTER
 const rest = new REST({ version: "10" }).setToken(TOKEN);
+
 (async () => {
   await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
 })();
@@ -267,20 +208,11 @@ client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
   if (interaction.commandName === "ask") {
-    const user = getUser(interaction.user.id);
     const question = interaction.options.getString("question");
-
-    // attachment (image)
-    const attachment = interaction.options.getAttachment?.("image");
-    const imageUrl = attachment?.url;
 
     await interaction.deferReply();
 
-    const result = await engine(question, { ...user, id: interaction.user.id }, imageUrl);
-
-    user.xp += 10;
-    levelUp(user);
-    save();
+    const result = await engine(question, {});
 
     await interaction.editReply(
       `🧠 Answer:\n${result.answer}\n\n📖 Explanation:\n${result.explanation}`

@@ -8,6 +8,7 @@
   "dependencies": {
     "discord.js": "^14.14.1",
     "node-fetch": "^2.6.7",
-    "mathjs": "^12.4.0"
+    "mathjs": "^12.4.0",
+    "nerdamer": "^1.1.13"
   }
 }

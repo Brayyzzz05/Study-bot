@@ -14,177 +14,149 @@ const client = new Client({
 
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-
-// 🔗 YOUR BACKEND
 const BACKEND_URL = process.env.BACKEND_URL;
 
-// ================== 🧠 BACKEND FUNCTIONS ==================
-
-async function askBackend(question) {
-  const res = await axios.post(`${BACKEND_URL}/chat`, {
-    message: question
-  });
-  return res.data.reply;
-}
-
-async function askImage(imageUrl, prompt) {
-  const res = await axios.post(`${BACKEND_URL}/image`, {
-    imageUrl,
-    prompt
-  });
-  return res.data.reply;
-}
-
-async function getQuiz(topic) {
-  const res = await axios.post(`${BACKEND_URL}/quiz`, {
-    topic
-  });
-  return res.data.reply;
-}
-
-async function getFlashcard(topic) {
-  const res = await axios.post(`${BACKEND_URL}/flashcard`, {
-    topic
-  });
-  return res.data.reply;
-}
-
-// ================== ⚡ COMMANDS ==================
+// ================= COMMANDS =================
 
 const commands = [
   new SlashCommandBuilder()
     .setName("ask")
-    .setDescription("Ask AI (text or image)")
+    .setDescription("Ask AI")
     .addStringOption(o =>
-      o.setName("question")
-        .setDescription("Your question")
-        .setRequired(false)
+      o.setName("question").setDescription("Your question")
     )
     .addAttachmentOption(o =>
-      o.setName("image")
-        .setDescription("Upload an image")
-        .setRequired(false)
+      o.setName("image").setDescription("Upload image")
     ),
 
   new SlashCommandBuilder()
     .setName("quiz")
-    .setDescription("Generate a quiz")
+    .setDescription("Generate quiz")
     .addStringOption(o =>
-      o.setName("topic")
-        .setDescription("Quiz topic")
-        .setRequired(true)
+      o.setName("topic").setRequired(true)
     ),
 
   new SlashCommandBuilder()
     .setName("flashcard")
-    .setDescription("Generate a flashcard")
+    .setDescription("Generate flashcard")
     .addStringOption(o =>
-      o.setName("topic")
-        .setDescription("Flashcard topic")
-        .setRequired(true)
+      o.setName("topic").setRequired(true)
     ),
 
   new SlashCommandBuilder()
     .setName("timer")
-    .setDescription("Start a study timer")
+    .setDescription("Study timer")
     .addIntegerOption(o =>
-      o.setName("minutes")
-        .setDescription("Minutes")
-        .setRequired(true)
-    )
+      o.setName("minutes").setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("reset")
+    .setDescription("Reset memory")
 ].map(c => c.toJSON());
 
-// ================== 🚀 REGISTER ==================
-
+// REGISTER
 const rest = new REST({ version: "10" }).setToken(TOKEN);
 
 (async () => {
-  await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+  await rest.put(Routes.applicationCommands(CLIENT_ID), {
+    body: commands
+  });
 })();
 
-// ================== ⏱ TIMER ==================
-
+// ================= TIMER =================
 const timers = new Map();
 
-// ================== 🎮 HANDLER ==================
-
+// ================= HANDLER =================
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
   await interaction.deferReply();
 
   try {
-    // ================== /ask ==================
+    // ===== /ask =====
     if (interaction.commandName === "ask") {
       const question = interaction.options.getString("question");
       const attachment = interaction.options.getAttachment("image");
 
-      // 📸 IMAGE MODE
       if (attachment) {
-        const reply = await askImage(
-          attachment.url,
-          question || "Explain this image"
-        );
+        const res = await axios.post(`${BACKEND_URL}/image`, {
+          imageUrl: attachment.url,
+          prompt: question || "Explain this"
+        });
 
-        return interaction.editReply(`🖼️ ${reply}`);
+        return interaction.editReply(`🖼️ ${res.data.reply}`);
       }
 
-      // 🧠 TEXT MODE
       if (!question) {
-        return interaction.editReply("❌ Please enter a question");
+        return interaction.editReply("❌ Enter a question");
       }
 
-      const reply = await askBackend(question);
+      const res = await axios.post(`${BACKEND_URL}/chat`, {
+        userId: interaction.user.id,
+        message: question
+      });
 
-      return interaction.editReply(`🧠 ${reply}`);
+      return interaction.editReply(`🧠 ${res.data.reply}`);
     }
 
-    // ================== /quiz ==================
+    // ===== /quiz =====
     if (interaction.commandName === "quiz") {
       const topic = interaction.options.getString("topic");
 
-      const reply = await getQuiz(topic);
+      const res = await axios.post(`${BACKEND_URL}/quiz`, {
+        topic
+      });
 
-      return interaction.editReply(`🧪 ${reply}`);
+      return interaction.editReply(`🧪 ${res.data.reply}`);
     }
 
-    // ================== /flashcard ==================
+    // ===== /flashcard =====
     if (interaction.commandName === "flashcard") {
       const topic = interaction.options.getString("topic");
 
-      const reply = await getFlashcard(topic);
+      const res = await axios.post(`${BACKEND_URL}/flashcard`, {
+        topic
+      });
 
-      return interaction.editReply(`🃏 ${reply}`);
+      return interaction.editReply(`🃏 ${res.data.reply}`);
     }
 
-    // ================== /timer ==================
+    // ===== /timer =====
     if (interaction.commandName === "timer") {
       const minutes = interaction.options.getInteger("minutes");
       const userId = interaction.user.id;
 
       if (timers.has(userId)) {
-        return interaction.editReply("⏱ You already have a timer running.");
+        return interaction.editReply("⏱ Timer already running");
       }
 
       const timeout = setTimeout(() => {
         interaction.followUp("⏱ Time’s up!");
         timers.delete(userId);
-      }, minutes * 60 * 1000);
+      }, minutes * 60000);
 
       timers.set(userId, timeout);
 
-      return interaction.editReply(`⏱ Timer set for ${minutes} minutes`);
+      return interaction.editReply(`⏱ ${minutes} min timer started`);
+    }
+
+    // ===== /reset =====
+    if (interaction.commandName === "reset") {
+      await axios.post(`${BACKEND_URL}/reset`, {
+        userId: interaction.user.id
+      });
+
+      return interaction.editReply("🧠 Memory cleared");
     }
 
   } catch (err) {
-    console.log("ERROR:", err.response?.data || err.message);
-
-    return interaction.editReply("❌ Failed to contact AI backend");
+    console.log(err.response?.data || err.message);
+    return interaction.editReply("❌ Error contacting backend");
   }
 });
 
-// ================== START ==================
-
+// START
 client.once("ready", () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 });

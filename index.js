@@ -1,16 +1,13 @@
 const {
   Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder,
-  ChannelType, PermissionsBitField
+  ActionRowBuilder, ButtonBuilder, ButtonStyle
 } = require("discord.js");
 
 const fs = require("fs");
 const fetch = require("node-fetch");
 
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildVoiceStates
-  ]
+  intents: [GatewayIntentBits.Guilds]
 });
 
 const TOKEN = process.env.TOKEN;
@@ -28,127 +25,66 @@ function save() {
 }
 
 function getUser(id) {
-  if (!data[id]) {
-    data[id] = {
-      xp: 0,
-      level: 1,
-      minutes: 0,
-      sessions: 0,
-      streak: 0,
-      lastStudy: 0,
-      focusStart: null,
-      memory: []
-    };
-  }
+  if (!data[id]) data[id] = { score: 0, memory: [] };
   return data[id];
 }
 
-// ===== LEVEL =====
-function checkLevel(user) {
-  const needed = user.level * 100;
-  if (user.xp >= needed) {
-    user.level++;
-    user.xp = 0;
-    return true;
-  }
-  return false;
-}
+// ===== CACHE =====
+let cache = {};
+const getCache = k => cache[k];
+const setCache = (k, v) => cache[k] = v;
 
-function getRank(level) {
-  if (level < 5) return "Beginner";
-  if (level < 10) return "Grinder";
-  if (level < 20) return "Scholar";
-  return "Master";
-}
+// ===== QUICK ANSWER =====
+function quickAnswer(input) {
+  const text = input.toLowerCase().trim();
 
-// ===== STREAK =====
-function updateStreak(user) {
-  const now = Date.now();
-  const day = 86400000;
-
-  if (now - user.lastStudy < day * 2) {
-    if (now - user.lastStudy > day) user.streak++;
-  } else {
-    user.streak = 1;
+  if (/^[0-9+\-*/().\s]+$/.test(text)) {
+    try {
+      return "🧠 " + Function(`return (${text})`)();
+    } catch {}
   }
 
-  user.lastStudy = now;
+  if (text === "hi") return "👋 Hello!";
+  return null;
 }
 
-// ===== AI (STREAMING FIX) =====
-async function askTextStream(prompt, memory, interaction) {
+// ===== AI =====
+async function askText(prompt, memory) {
   try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
+      signal: controller.signal,
       headers: {
         "Authorization": `Bearer ${OPENAI_API_KEY}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
-        stream: true,
         messages: [
-          {
-            role: "system",
-            content: "You are a helpful AI tutor. Reply clearly and step-by-step."
-          },
-          ...memory.slice(-5),
+          { role: "system", content: "Answer clearly and shortly." },
+          ...memory.slice(-2),
           { role: "user", content: prompt }
         ]
       })
     });
 
-    if (!res.ok || !res.body) {
-      console.log("API ERROR:", await res.text());
-      return "⚠️ AI failed to respond.";
-    }
+    clearTimeout(timeout);
 
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
+    if (!res.ok) return "⚠️ API error";
 
-    let fullText = "";
-    let lastUpdate = "";
+    const json = await res.json();
+    return json.choices?.[0]?.message?.content || "⚠️ No response";
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      const chunk = decoder.decode(value);
-      const lines = chunk.split("\n");
-
-      for (let line of lines) {
-        if (line.startsWith("data: ")) {
-          const data = line.replace("data: ", "");
-
-          if (data === "[DONE]") continue;
-
-          try {
-            const json = JSON.parse(data);
-            const token = json.choices?.[0]?.delta?.content;
-
-            if (token) {
-              fullText += token;
-
-              // Update message occasionally (avoid rate limit)
-              if (fullText.length - lastUpdate.length > 80) {
-                await interaction.editReply(fullText);
-                lastUpdate = fullText;
-              }
-            }
-          } catch {}
-        }
-      }
-    }
-
-    return fullText || "⚠️ No response.";
-  } catch (err) {
-    console.error(err);
-    return "⚠️ Error contacting AI.";
+  } catch {
+    return "⚠️ AI timeout";
   }
 }
 
-// ===== IMAGE AI =====
-async function askImage(question, imageUrl) {
+// ===== QUIZ GENERATOR =====
+async function generateQuiz(topic) {
   try {
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -161,24 +97,18 @@ async function askImage(question, imageUrl) {
         messages: [
           {
             role: "system",
-            content: "You analyze images and explain clearly."
+            content: "Return JSON: [{q, options:[A,B,C,D], answer}]"
           },
-          {
-            role: "user",
-            content: [
-              { type: "text", text: question || "Explain this image" },
-              { type: "image_url", image_url: { url: imageUrl } }
-            ]
-          }
+          { role: "user", content: topic }
         ]
       })
     });
 
     const json = await res.json();
-    return json.choices?.[0]?.message?.content || "No response";
-  } catch (err) {
-    console.error(err);
-    return "⚠️ Image AI failed.";
+    return JSON.parse(json.choices[0].message.content);
+
+  } catch {
+    return null;
   }
 }
 
@@ -188,50 +118,26 @@ const commands = [
     .setName("ask")
     .setDescription("Ask AI")
     .addStringOption(o =>
-      o.setName("type")
-        .setDescription("question or image")
-        .setRequired(true)
-        .addChoices(
-          { name: "question", value: "question" },
-          { name: "image", value: "image" }
-        )
-    )
-    .addStringOption(o =>
-      o.setName("question").setDescription("Your question")
-    )
-    .addAttachmentOption(o =>
-      o.setName("image").setDescription("Upload image")
+      o.setName("question").setRequired(true)
     ),
 
   new SlashCommandBuilder()
-    .setName("focus")
-    .setDescription("Focus mode")
+    .setName("quiz")
+    .setDescription("Interactive quiz")
     .addStringOption(o =>
-      o.setName("action")
-        .setDescription("start or stop")
-        .setRequired(true)
-        .addChoices(
-          { name: "start", value: "start" },
-          { name: "stop", value: "stop" }
-        )
+      o.setName("topic").setRequired(true)
     ),
 
-  new SlashCommandBuilder().setName("stats").setDescription("View stats"),
-
-  new SlashCommandBuilder().setName("leaderboard").setDescription("Top users"),
+  new SlashCommandBuilder()
+    .setName("flashcards")
+    .setDescription("Flashcards")
+    .addStringOption(o =>
+      o.setName("topic").setRequired(true)
+    ),
 
   new SlashCommandBuilder()
-    .setName("studyroom")
-    .setDescription("Create a study room")
-    .addStringOption(o =>
-      o.setName("type")
-        .setDescription("public or private")
-        .setRequired(true)
-        .addChoices(
-          { name: "public", value: "public" },
-          { name: "private", value: "private" }
-        )
-    )
+    .setName("score")
+    .setDescription("View your score")
 ].map(c => c.toJSON());
 
 // ===== REGISTER =====
@@ -240,122 +146,97 @@ const rest = new REST({ version: "10" }).setToken(TOKEN);
   await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
 })();
 
-// ===== HANDLER =====
+// ===== QUIZ STATE =====
+let activeQuizzes = {};
+
+// ===== INTERACTIONS =====
 client.on("interactionCreate", async interaction => {
+
+  // BUTTONS
+  if (interaction.isButton()) {
+    const [quizId, choice] = interaction.customId.split("_");
+    const quiz = activeQuizzes[quizId];
+    if (!quiz) return;
+
+    const user = getUser(interaction.user.id);
+
+    if (choice === quiz.answer) {
+      user.score++;
+      save();
+      return interaction.reply({ content: "✅ Correct!", ephemeral: true });
+    } else {
+      return interaction.reply({
+        content: `❌ Wrong! Answer: ${quiz.answer}`,
+        ephemeral: true
+      });
+    }
+  }
+
   if (!interaction.isChatInputCommand()) return;
 
   const user = getUser(interaction.user.id);
 
   // ===== ASK =====
   if (interaction.commandName === "ask") {
-    const type = interaction.options.getString("type");
+    const question = interaction.options.getString("question");
 
     await interaction.deferReply();
 
-    // TIMEOUT PROTECTION
-    const timeout = setTimeout(() => {
-      interaction.editReply("⚠️ Took too long to respond.");
-    }, 15000);
+    const quick = quickAnswer(question);
+    if (quick) return interaction.editReply(quick);
 
-    try {
-      if (type === "question") {
-        const question = interaction.options.getString("question");
-        if (!question) {
-          clearTimeout(timeout);
-          return interaction.editReply("❌ Enter a question!");
-        }
+    const cached = getCache(question);
+    if (cached) return interaction.editReply("⚡ " + cached);
 
-        let res = await askTextStream(question, user.memory, interaction);
+    const res = await askText(question, user.memory);
 
-        user.memory.push({ role: "user", content: question });
-        user.memory.push({ role: "assistant", content: res });
+    setCache(question, res);
 
-        save();
-        clearTimeout(timeout);
-        return;
-      }
-
-      if (type === "image") {
-        const attachment = interaction.options.getAttachment("image");
-        if (!attachment) {
-          clearTimeout(timeout);
-          return interaction.editReply("❌ Upload an image!");
-        }
-
-        const res = await askImage("Explain this image", attachment.url);
-        clearTimeout(timeout);
-        return interaction.editReply(res);
-      }
-
-    } catch (err) {
-      console.error(err);
-      clearTimeout(timeout);
-      return interaction.editReply("❌ Error occurred.");
-    }
+    return interaction.editReply(res);
   }
 
-  // ===== OTHER COMMANDS =====
+  // ===== QUIZ =====
+  if (interaction.commandName === "quiz") {
+    const topic = interaction.options.getString("topic");
 
-  if (interaction.commandName === "stats") {
-    return interaction.reply(
-      `📊 Level: ${user.level}
-XP: ${user.xp}
-Minutes: ${user.minutes}
-Streak: ${user.streak}`
+    await interaction.deferReply();
+
+    const quizData = await generateQuiz(topic);
+    if (!quizData) return interaction.editReply("❌ Failed to generate quiz");
+
+    const q = quizData[0];
+    const quizId = Date.now().toString();
+
+    activeQuizzes[quizId] = { answer: q.answer };
+
+    const row = new ActionRowBuilder().addComponents(
+      q.options.map(opt =>
+        new ButtonBuilder()
+          .setCustomId(`${quizId}_${opt}`)
+          .setLabel(opt)
+          .setStyle(ButtonStyle.Primary)
+      )
     );
-  }
 
-  if (interaction.commandName === "focus") {
-    const action = interaction.options.getString("action");
-
-    if (action === "start") {
-      user.focusStart = Date.now();
-      return interaction.reply("🎯 Focus started!");
-    }
-
-    if (action === "stop" && user.focusStart) {
-      const mins = Math.floor((Date.now() - user.focusStart) / 60000);
-      user.minutes += mins;
-      user.xp += mins * 3;
-
-      updateStreak(user);
-      const leveledUp = checkLevel(user);
-
-      save();
-
-      return interaction.reply(
-        `🔥 ${mins} mins\nLevel: ${user.level}` +
-        (leveledUp ? "\n🎉 LEVEL UP!" : "")
-      );
-    }
-  }
-
-  if (interaction.commandName === "leaderboard") {
-    const top = Object.entries(data)
-      .sort((a, b) => b[1].level - a[1].level)
-      .slice(0, 5);
-
-    let text = "🏆 Leaderboard:\n";
-    top.forEach((u, i) => {
-      text += `${i + 1}. <@${u[0]}> - Lv ${u[1].level}\n`;
+    return interaction.editReply({
+      content: `📝 ${q.q}`,
+      components: [row]
     });
-
-    return interaction.reply(text);
   }
 
-  if (interaction.commandName === "studyroom") {
-    const type = interaction.options.getString("type");
+  // ===== FLASHCARDS =====
+  if (interaction.commandName === "flashcards") {
+    const topic = interaction.options.getString("topic");
 
-    const channel = await interaction.guild.channels.create({
-      name: `Study - ${interaction.user.username}`,
-      type: ChannelType.GuildVoice,
-      permissionOverwrites: type === "private" ? [
-        { id: interaction.guild.id, deny: [PermissionsBitField.Flags.Connect] },
-        { id: interaction.user.id, allow: [PermissionsBitField.Flags.Connect] }
-      ] : []
-    });
+    await interaction.deferReply();
 
-    return interaction.reply(`🎙 ${channel}`);
+    const res = await askText(`Create flashcards for ${topic}`, []);
+    return interaction.editReply(res);
+  }
+
+  // ===== SCORE =====
+  if (interaction.commandName === "score") {
+    return interaction.reply(`🏆 Score: ${user.score}`);
   }
 });
 

@@ -1,14 +1,13 @@
 {
-  "name": "final-study-bot",
-  "version": "1.0.0",
+  "name": "study-ai-bot",
+  "version": "5.0.0",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "discord.js": "^14.14.1",
-    "node-fetch": "^2.6.7",
     "mathjs": "^12.4.0",
-    "nerdamer": "^1.1.13"
+    "axios": "^1.6.0"
   }
 }

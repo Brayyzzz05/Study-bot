@@ -9,8 +9,8 @@ const {
 const fs = require("fs");
 const fetch = require("node-fetch");
 const math = require("mathjs");
+const nerdamer = require("nerdamer/all.min");
 
-// ===== CLIENT =====
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
@@ -32,16 +32,11 @@ function save() {
 
 function getUser(id) {
   if (!data[id]) {
-    data[id] = {
-      xp: 0,
-      level: 1,
-      memory: []
-    };
+    data[id] = { xp: 0, level: 1, memory: [] };
   }
   return data[id];
 }
 
-// ===== LEVEL SYSTEM =====
 function checkLevel(user) {
   if (user.xp >= user.level * 100) {
     user.level++;
@@ -49,11 +44,11 @@ function checkLevel(user) {
   }
 }
 
-// ===== DETECT TYPE =====
+// ===== DETECT =====
 function detectType(input) {
   const text = input.toLowerCase();
 
-  if (/[\dxyz\+\-\*\/\^\(\)]/.test(input)) return "math";
+  if (/[\dxyz\+\-\*\/\^\(\)=]/.test(input)) return "math";
   if (text.startsWith("quiz ")) return "quiz";
   if (text.startsWith("flashcard ")) return "flashcard";
 
@@ -61,13 +56,38 @@ function detectType(input) {
 }
 
 // ===== MATH ENGINE =====
-function solveMath(input) {
+function isMath(input) {
+  return /^[\dxyz\+\-\*\/\^\(\)=\s]+$/i.test(input);
+}
+
+function handleMath(input) {
   try {
-    const result = math.simplify(input).toString();
+    // Solve equation
+    if (input.includes("=")) {
+      const result = nerdamer.solveEquations(input);
+      return {
+        answer: `x = ${result.join(", ")}`,
+        explanation: "Solved using algebra engine"
+      };
+    }
+
+    // Factor
+    const factored = nerdamer.factor(input).toString();
+    if (factored !== input) {
+      return {
+        answer: factored,
+        explanation: "Factored using symbolic math"
+      };
+    }
+
+    // Expand
+    const expanded = nerdamer.expand(input).toString();
+
     return {
-      answer: result,
-      explanation: "Solved using math engine"
+      answer: expanded,
+      explanation: "Expanded expression"
     };
+
   } catch {
     return null;
   }
@@ -75,23 +95,19 @@ function solveMath(input) {
 
 // ===== QUIZ =====
 function makeQuiz(topic, user) {
-  const level = user.level;
-
   return {
     answer: `📚 Quiz: ${topic}`,
     explanation: `
-Level ${level}
+Level: ${user.level}
 
-${level < 3 ? `
+${user.level < 3 ? `
 1. What is ${topic}?
-2. Give a basic example.
+2. Give a simple example.
 ` : `
 1. Explain ${topic} in detail
-2. Apply it in real life
-3. Solve a problem using ${topic}
+2. Give real-world application
+3. Solve a problem
 `}
-
-Focus on learning step by step.
 `
   };
 }
@@ -104,11 +120,11 @@ function makeFlashcards(topic) {
 Q: What is ${topic}?
 A: Definition
 
-Q: Key idea?
-A: Important concept
+Q: Key concept?
+A: Core idea
 
 Q: Example?
-A: Real-world usage
+A: Usage
 `
   };
 }
@@ -124,25 +140,19 @@ async function askAI(prompt, user) {
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
-        temperature: 0.1,
+        temperature: 0.2,
         messages: [
           {
             role: "system",
             content: `
-You are a STRICT AI tutor.
+STRICT FORMAT:
 
-RULES:
-- NEVER repeat the question
-- ALWAYS follow EXACT format:
-
-Answer: <final answer>
+Answer: <answer>
 
 Explanation:
-<step-by-step explanation>
+<explanation>
 
-- Adapt to user level: ${user.level}
-- Keep answers clear and structured
-- No extra text outside format
+No extra text.
             `
           },
           { role: "user", content: prompt }
@@ -153,38 +163,37 @@ Explanation:
     const json = await res.json();
     return json.choices?.[0]?.message?.content || "No response";
   } catch {
-    return "AI error";
+    return "❌ AI error";
   }
 }
 
-// ===== MAIN ENGINE =====
+// ===== ENGINE =====
 async function engine(input, user) {
-  const type = detectType(input);
 
-  // ⚡ MATH
-  if (type === "math") {
-    const res = solveMath(input);
-    if (res) return res;
+  // ⚡ MATH FIRST
+  if (isMath(input)) {
+    const mathResult = handleMath(input);
+    if (mathResult) return mathResult;
   }
 
-  // 📚 QUIZ
+  const type = detectType(input);
+
   if (type === "quiz") {
     const topic = input.replace("quiz", "").trim();
     return makeQuiz(topic, user);
   }
 
-  // 🧾 FLASHCARDS
   if (type === "flashcard") {
     const topic = input.replace("flashcard", "").trim();
     return makeFlashcards(topic);
   }
 
-  // 🧠 AI
+  // 🤖 AI
   const ai = await askAI(input, user);
 
   return {
     answer: ai,
-    explanation: "AI generated response"
+    explanation: "AI response"
   };
 }
 
@@ -206,32 +215,27 @@ const rest = new REST({ version: "10" }).setToken(TOKEN);
   await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
 })();
 
-// ===== BOT HANDLER =====
+// ===== BOT =====
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
-  const user = getUser(interaction.user.id);
-
   if (interaction.commandName === "ask") {
+    const user = getUser(interaction.user.id);
     const question = interaction.options.getString("question");
 
     await interaction.deferReply();
 
     const result = await engine(question, user);
 
-    user.memory.push({ role: "user", content: question });
-    user.memory.push({ role: "assistant", content: result.answer });
-
     user.xp += 10;
     checkLevel(user);
 
     save();
 
-    return interaction.editReply(
+    await interaction.editReply(
       `🧠 Answer:\n${result.answer}\n\n📖 Explanation:\n${result.explanation}`
     );
   }
 });
 
-// ===== LOGIN =====
 client.login(TOKEN);

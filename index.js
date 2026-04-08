@@ -97,7 +97,7 @@ async function generateQuiz(topic) {
         messages: [
           {
             role: "system",
-            content: "Return JSON: [{q, options:[A,B,C,D], answer}]"
+            content: "Return ONLY valid JSON like: [{\"q\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"],\"answer\":\"A\"}]"
           },
           { role: "user", content: topic }
         ]
@@ -105,34 +105,50 @@ async function generateQuiz(topic) {
     });
 
     const json = await res.json();
-    return JSON.parse(json.choices[0].message.content);
 
-  } catch {
+    const content = json.choices?.[0]?.message?.content;
+    if (!content) return null;
+
+    const parsed = JSON.parse(content);
+
+    // ✅ ensure strings
+    parsed[0].options = parsed[0].options.map(o => String(o));
+
+    return parsed;
+
+  } catch (err) {
+    console.error("QUIZ ERROR:", err);
     return null;
   }
 }
 
-// ===== COMMANDS =====
+// ===== COMMANDS (FIXED) =====
 const commands = [
   new SlashCommandBuilder()
     .setName("ask")
     .setDescription("Ask AI")
     .addStringOption(o =>
-      o.setName("question").setRequired(true)
+      o.setName("question")
+        .setDescription("Your question") // ✅ FIXED
+        .setRequired(true)
     ),
 
   new SlashCommandBuilder()
     .setName("quiz")
     .setDescription("Interactive quiz")
     .addStringOption(o =>
-      o.setName("topic").setRequired(true)
+      o.setName("topic")
+        .setDescription("Quiz topic") // ✅ FIXED
+        .setRequired(true)
     ),
 
   new SlashCommandBuilder()
     .setName("flashcards")
     .setDescription("Flashcards")
     .addStringOption(o =>
-      o.setName("topic").setRequired(true)
+      o.setName("topic")
+        .setDescription("Flashcard topic") // ✅ FIXED
+        .setRequired(true)
     ),
 
   new SlashCommandBuilder()
@@ -149,10 +165,10 @@ const rest = new REST({ version: "10" }).setToken(TOKEN);
 // ===== QUIZ STATE =====
 let activeQuizzes = {};
 
-// ===== INTERACTIONS =====
+// ===== HANDLER =====
 client.on("interactionCreate", async interaction => {
 
-  // BUTTONS
+  // ===== BUTTONS =====
   if (interaction.isButton()) {
     const [quizId, choice] = interaction.customId.split("_");
     const quiz = activeQuizzes[quizId];
@@ -207,13 +223,13 @@ client.on("interactionCreate", async interaction => {
     const q = quizData[0];
     const quizId = Date.now().toString();
 
-    activeQuizzes[quizId] = { answer: q.answer };
+    activeQuizzes[quizId] = { answer: String(q.answer) };
 
     const row = new ActionRowBuilder().addComponents(
       q.options.map(opt =>
         new ButtonBuilder()
           .setCustomId(`${quizId}_${opt}`)
-          .setLabel(opt)
+          .setLabel(String(opt)) // ✅ FORCE STRING
           .setStyle(ButtonStyle.Primary)
       )
     );

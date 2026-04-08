@@ -1,196 +1,150 @@
-// ================= BOT (index.js) =================
-
-const {
-  Client,
-  GatewayIntentBits,
-  SlashCommandBuilder,
-  REST,
-  Routes
-} = require("discord.js");
-
-const axios = require("axios");
+import { Client, GatewayIntentBits, EmbedBuilder } from "discord.js";
+import fetch from "node-fetch";
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ]
 });
 
-const TOKEN = process.env.TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
 const BACKEND_URL = process.env.BACKEND_URL;
 
-// ================= COMMANDS =================
-const commands = [
-  new SlashCommandBuilder()
-    .setName("ask")
-    .setDescription("Ask AI (text or image)")
-    .addStringOption(o =>
-      o.setName("question")
-        .setDescription("Your question")
-        .setRequired(false)
-    )
-    .addAttachmentOption(o =>
-      o.setName("image")
-        .setDescription("Upload an image")
-        .setRequired(false)
-    ),
-
-  new SlashCommandBuilder()
-    .setName("quiz")
-    .setDescription("Generate a quiz")
-    .addStringOption(o =>
-      o.setName("topic")
-        .setDescription("Quiz topic")
-        .setRequired(true)
-    ),
-
-  new SlashCommandBuilder()
-    .setName("flashcard")
-    .setDescription("Generate a flashcard")
-    .addStringOption(o =>
-      o.setName("topic")
-        .setDescription("Flashcard topic")
-        .setRequired(true)
-    ),
-
-  new SlashCommandBuilder()
-    .setName("timer")
-    .setDescription("Start a study timer")
-    .addIntegerOption(o =>
-      o.setName("minutes")
-        .setDescription("Time in minutes")
-        .setRequired(true)
-    ),
-
-  new SlashCommandBuilder()
-    .setName("reset")
-    .setDescription("Reset conversation memory")
-].map(cmd => cmd.toJSON());
-
-// ================= REGISTER COMMANDS =================
-const rest = new REST({ version: "10" }).setToken(TOKEN);
-
-(async () => {
-  try {
-    console.log("🔄 Registering commands...");
-    await rest.put(Routes.applicationCommands(CLIENT_ID), {
-      body: commands
-    });
-    console.log("✅ Commands registered");
-  } catch (err) {
-    console.error("❌ Command registration failed:", err);
-  }
-})();
-
-// ================= TIMER STORAGE =================
+// Simple in-memory storage
+const flashcards = new Map();
+const quizzes = new Map();
 const timers = new Map();
 
-// ================= INTERACTION HANDLER =================
-client.on("interactionCreate", async interaction => {
-  if (!interaction.isChatInputCommand()) return;
+client.on("messageCreate", async (message) => {
+  if (message.author.bot) return;
 
-  try {
-    await interaction.deferReply(); // ✅ prevents timeout
+  const args = message.content.split(" ");
+  const command = args.shift().toLowerCase();
 
-    // ===== /ask =====
-    if (interaction.commandName === "ask") {
-      const question = interaction.options.getString("question");
-      const attachment = interaction.options.getAttachment("image");
+  // =====================
+  // 🧠 ASK (TEXT AI)
+  // =====================
+  if (command === "/ask") {
+    const question = args.join(" ");
 
-      // 📸 IMAGE MODE
-      if (attachment) {
-        const res = await axios.post(
-          `${BACKEND_URL}/image`,
-          {
-            imageUrl: attachment.url,
-            prompt: question || "Explain this image"
-          },
-          { timeout: 10000 }
-        );
+    if (!question && message.attachments.size === 0) {
+      return message.reply("❌ Provide a question or image");
+    }
 
-        return interaction.editReply(`🖼️ ${res.data.reply}`);
+    try {
+      let body = { message: question };
+
+      // IMAGE SUPPORT
+      if (message.attachments.size > 0) {
+        const image = message.attachments.first().url;
+        body.image = image;
       }
 
-      if (!question) {
-        return interaction.editReply("❌ Please enter a question");
+      const res = await fetch(`${BACKEND_URL}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+
+      const data = await res.json();
+
+      if (!data.reply) {
+        return message.reply("❌ No AI response");
       }
 
-      const res = await axios.post(
-        `${BACKEND_URL}/chat`,
-        {
-          userId: interaction.user.id,
-          message: question
-        },
-        { timeout: 10000 }
-      );
+      message.reply(data.reply);
 
-      return interaction.editReply(`🧠 ${res.data.reply}`);
+    } catch (err) {
+      console.error(err);
+      message.reply("❌ AI error");
     }
+  }
 
-    // ===== /quiz =====
-    if (interaction.commandName === "quiz") {
-      const topic = interaction.options.getString("topic");
+  // =====================
+  // 🧠 FLASHCARDS
+  // =====================
+  if (command === "/flashcard") {
+    const [sub, ...rest] = args;
 
-      const res = await axios.post(
-        `${BACKEND_URL}/quiz`,
-        { topic },
-        { timeout: 10000 }
-      );
-
-      return interaction.editReply(`🧪 ${res.data.reply}`);
-    }
-
-    // ===== /flashcard =====
-    if (interaction.commandName === "flashcard") {
-      const topic = interaction.options.getString("topic");
-
-      const res = await axios.post(
-        `${BACKEND_URL}/flashcard`,
-        { topic },
-        { timeout: 10000 }
-      );
-
-      return interaction.editReply(`🃏 ${res.data.reply}`);
-    }
-
-    // ===== /timer =====
-    if (interaction.commandName === "timer") {
-      const minutes = interaction.options.getInteger("minutes");
-      const userId = interaction.user.id;
-
-      if (timers.has(userId)) {
-        return interaction.editReply("⏱ You already have a timer running");
+    if (sub === "add") {
+      const [front, back] = rest.join(" ").split("|");
+      if (!front || !back) {
+        return message.reply("❌ Use: /flashcard add question|answer");
       }
 
-      const timeout = setTimeout(() => {
-        interaction.followUp("⏱ Time’s up!");
-        timers.delete(userId);
-      }, minutes * 60000);
-
-      timers.set(userId, timeout);
-
-      return interaction.editReply(`⏱ Timer started for ${minutes} minutes`);
+      flashcards.set(front, back);
+      message.reply("✅ Flashcard saved");
     }
 
-    // ===== /reset =====
-    if (interaction.commandName === "reset") {
-      await axios.post(
-        `${BACKEND_URL}/reset`,
-        { userId: interaction.user.id },
-        { timeout: 5000 }
-      );
+    if (sub === "quiz") {
+      const entries = Array.from(flashcards.entries());
+      if (entries.length === 0) return message.reply("❌ No flashcards");
 
-      return interaction.editReply("🧠 Memory reset!");
+      const [question, answer] = entries[Math.floor(Math.random() * entries.length)];
+
+      quizzes.set(message.author.id, answer);
+
+      message.reply(`❓ ${question}`);
     }
 
-  } catch (err) {
-    console.error("❌ ERROR:", err.response?.data || err.message);
-    return interaction.editReply("❌ Failed to contact backend");
+    if (sub === "answer") {
+      const correct = quizzes.get(message.author.id);
+      const userAnswer = rest.join(" ");
+
+      if (!correct) return message.reply("❌ No active quiz");
+
+      if (userAnswer.toLowerCase() === correct.toLowerCase()) {
+        message.reply("✅ Correct!");
+      } else {
+        message.reply(`❌ Wrong! Answer: ${correct}`);
+      }
+
+      quizzes.delete(message.author.id);
+    }
+  }
+
+  // =====================
+  // ⏱ TIMER
+  // =====================
+  if (command === "/timer") {
+    const minutes = parseInt(args[0]);
+
+    if (isNaN(minutes)) return message.reply("❌ Enter minutes");
+
+    message.reply(`⏱ Timer started for ${minutes} minutes`);
+
+    setTimeout(() => {
+      message.reply(`⏰ Time's up!`);
+    }, minutes * 60000);
+  }
+
+  // =====================
+  // ➗ MATH ENGINE (LOCAL)
+  // =====================
+  if (command === "/math") {
+    const expression = args.join(" ");
+
+    try {
+      // VERY basic safe eval
+      if (!expression) return message.reply("❌ No expression");
+
+      // Handle simple factorable forms manually
+      if (expression.includes("x^2")) {
+        return message.reply("🧠 Answer: Factorisation handled by AI backend");
+      }
+
+      const result = eval(expression.replace(/[^0-9+\-*/().]/g, ""));
+
+      message.reply(`🧠 Answer: ${result}`);
+    } catch {
+      message.reply("❌ Invalid math");
+    }
   }
 });
 
-// ================= START BOT =================
 client.once("ready", () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 });
 
-client.login(TOKEN);
+client.login(process.env.DISCORD_TOKEN);

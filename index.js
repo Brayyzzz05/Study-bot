@@ -1,7 +1,9 @@
 const {
   Client,
   GatewayIntentBits,
-  EmbedBuilder
+  SlashCommandBuilder,
+  REST,
+  Routes
 } = require("discord.js");
 
 const axios = require("axios");
@@ -11,81 +13,100 @@ const client = new Client({
 });
 
 const TOKEN = process.env.TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+
+// 🔗 YOUR BACKEND
 const BACKEND_URL = process.env.BACKEND_URL;
 
-// ================== 🧠 MATH ENGINE ==================
-function solveMath(input) {
-  try {
-    // basic arithmetic
-    if (/^[0-9+\-*/(). x^]+$/.test(input)) {
-      const result = Function(`return (${input.replace(/x/g, "*")})`)();
-      return {
-        answer: String(result),
-        explanation: "Computed using local math engine"
-      };
-    }
+// ================== 🧠 BACKEND FUNCTIONS ==================
 
-    // detect quadratic (x^2)
-    if (/x\^2/.test(input)) {
-      return {
-        answer: "Quadratic detected",
-        explanation: "Sent to AI for solving (factorisation / expansion)"
-      };
-    }
-
-    return null;
-
-  } catch {
-    return null;
-  }
-}
-
-// ================== 🤖 AI CALL ==================
-async function askAI(prompt) {
-  try {
-    const res = await axios.post(`${BACKEND_URL}/chat`, {
-      userId: "discord",
-      message: prompt
-    });
-
-    return res.data.reply;
-
-  } catch {
-    return "❌ AI unavailable";
-  }
-}
-
-// ================== 🧪 QUIZ ==================
-async function generateQuiz(topic) {
-  const res = await axios.post(`${BACKEND_URL}/quiz`, { topic });
-
+async function askBackend(question) {
+  const res = await axios.post(`${BACKEND_URL}/chat`, {
+    message: question
+  });
   return res.data.reply;
 }
 
-// ================== 🃏 FLASHCARDS ==================
-async function generateFlashcard(topic) {
-  const res = await axios.post(`${BACKEND_URL}/flashcard`, { topic });
-
-  return res.data.reply;
-}
-
-// ================== 📸 IMAGE ==================
-async function solveImage(imageUrl, prompt) {
+async function askImage(imageUrl, prompt) {
   const res = await axios.post(`${BACKEND_URL}/image`, {
     imageUrl,
     prompt
   });
-
   return res.data.reply;
 }
 
-// ================== ⏱ TIMER STORAGE ==================
+async function getQuiz(topic) {
+  const res = await axios.post(`${BACKEND_URL}/quiz`, {
+    topic
+  });
+  return res.data.reply;
+}
+
+async function getFlashcard(topic) {
+  const res = await axios.post(`${BACKEND_URL}/flashcard`, {
+    topic
+  });
+  return res.data.reply;
+}
+
+// ================== ⚡ COMMANDS ==================
+
+const commands = [
+  new SlashCommandBuilder()
+    .setName("ask")
+    .setDescription("Ask AI (text or image)")
+    .addStringOption(o =>
+      o.setName("question")
+        .setDescription("Your question")
+        .setRequired(false)
+    )
+    .addAttachmentOption(o =>
+      o.setName("image")
+        .setDescription("Upload an image")
+        .setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("quiz")
+    .setDescription("Generate a quiz")
+    .addStringOption(o =>
+      o.setName("topic")
+        .setDescription("Quiz topic")
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("flashcard")
+    .setDescription("Generate a flashcard")
+    .addStringOption(o =>
+      o.setName("topic")
+        .setDescription("Flashcard topic")
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("timer")
+    .setDescription("Start a study timer")
+    .addIntegerOption(o =>
+      o.setName("minutes")
+        .setDescription("Minutes")
+        .setRequired(true)
+    )
+].map(c => c.toJSON());
+
+// ================== 🚀 REGISTER ==================
+
+const rest = new REST({ version: "10" }).setToken(TOKEN);
+
+(async () => {
+  await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+})();
+
+// ================== ⏱ TIMER ==================
+
 const timers = new Map();
 
-// ================== BOT ==================
-client.once("ready", () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
-});
+// ================== 🎮 HANDLER ==================
 
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
@@ -98,47 +119,47 @@ client.on("interactionCreate", async interaction => {
       const question = interaction.options.getString("question");
       const attachment = interaction.options.getAttachment("image");
 
-      // 📸 IMAGE
+      // 📸 IMAGE MODE
       if (attachment) {
-        const result = await solveImage(attachment.url, question || "Explain this image");
-        return interaction.editReply(`🖼️ Answer:\n${result}`);
-      }
-
-      // 🧠 MATH
-      const math = solveMath(question);
-      if (math) {
-        return interaction.editReply(
-          `🧠 Answer: ${math.answer}\n\n📖 Explanation: ${math.explanation}`
+        const reply = await askImage(
+          attachment.url,
+          question || "Explain this image"
         );
+
+        return interaction.editReply(`🖼️ ${reply}`);
       }
 
-      // 🤖 AI
-      const ai = await askAI(question);
-      return interaction.editReply(`🧠 Answer:\n${ai}`);
+      // 🧠 TEXT MODE
+      if (!question) {
+        return interaction.editReply("❌ Please enter a question");
+      }
+
+      const reply = await askBackend(question);
+
+      return interaction.editReply(`🧠 ${reply}`);
     }
 
     // ================== /quiz ==================
     if (interaction.commandName === "quiz") {
       const topic = interaction.options.getString("topic");
 
-      const quiz = await generateQuiz(topic);
+      const reply = await getQuiz(topic);
 
-      return interaction.editReply(`🧪 Quiz:\n${quiz}`);
+      return interaction.editReply(`🧪 ${reply}`);
     }
 
     // ================== /flashcard ==================
     if (interaction.commandName === "flashcard") {
       const topic = interaction.options.getString("topic");
 
-      const card = await generateFlashcard(topic);
+      const reply = await getFlashcard(topic);
 
-      return interaction.editReply(`🃏 Flashcard:\n${card}`);
+      return interaction.editReply(`🃏 ${reply}`);
     }
 
     // ================== /timer ==================
     if (interaction.commandName === "timer") {
       const minutes = interaction.options.getInteger("minutes");
-
       const userId = interaction.user.id;
 
       if (timers.has(userId)) {
@@ -146,19 +167,26 @@ client.on("interactionCreate", async interaction => {
       }
 
       const timeout = setTimeout(() => {
-        interaction.followUp(`⏱ Timer finished!`);
+        interaction.followUp("⏱ Time’s up!");
         timers.delete(userId);
       }, minutes * 60 * 1000);
 
       timers.set(userId, timeout);
 
-      return interaction.editReply(`⏱ Timer started for ${minutes} minutes`);
+      return interaction.editReply(`⏱ Timer set for ${minutes} minutes`);
     }
 
   } catch (err) {
-    console.log(err);
-    return interaction.editReply("❌ Error occurred.");
+    console.log("ERROR:", err.response?.data || err.message);
+
+    return interaction.editReply("❌ Failed to contact AI backend");
   }
+});
+
+// ================== START ==================
+
+client.once("ready", () => {
+  console.log(`✅ Logged in as ${client.user.tag}`);
 });
 
 client.login(TOKEN);
